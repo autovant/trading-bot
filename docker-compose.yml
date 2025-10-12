@@ -1,0 +1,154 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:13
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tradingbot
+      POSTGRES_PASSWORD: tradingbot
+      POSTGRES_DB: tradingbot
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  nats:
+    image: nats:latest
+    container_name: nats-server
+    restart: unless-stopped
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["--http_port", "8222"]
+
+  strategy-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: strategy-engine
+    restart: unless-stopped
+    environment:
+      APP_MODE: ${APP_MODE:-paper}
+      PYTHONPATH: /app
+      EXCHANGE_API_KEY: ${EXCHANGE_API_KEY}
+      EXCHANGE_SECRET_KEY: ${EXCHANGE_SECRET_KEY}
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      - nats
+      - postgres
+
+  execution:
+    build:
+      context: .
+      dockerfile: Dockerfile.services
+    container_name: execution
+    restart: unless-stopped
+    environment:
+      APP_MODE: ${APP_MODE:-paper}
+    command: ["/execution_service"]
+    depends_on:
+      - nats
+
+  feature-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.services
+    container_name: feature-engine
+    restart: unless-stopped
+    environment:
+      APP_MODE: ${APP_MODE:-paper}
+    command: ["/feed_handler"]
+    depends_on:
+      - nats
+
+  ops-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.services
+    container_name: ops-api
+    restart: unless-stopped
+    environment:
+      APP_MODE: ${APP_MODE:-paper}
+    command: ["/ops_api"]
+    ports:
+      - "8082:8082"
+    depends_on:
+      - nats
+
+  dash:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dash
+    restart: unless-stopped
+    environment:
+      APP_MODE: ${APP_MODE:-paper}
+      PYTHONPATH: /app
+    ports:
+      - "8501:8501"
+    command: ["streamlit", "run", "dashboard/app.py"]
+    depends_on:
+      - strategy-engine
+
+  reporter:
+    build:
+      context: .
+      dockerfile: Dockerfile.services
+    container_name: reporter
+    restart: unless-stopped
+    environment:
+      APP_MODE: ${APP_MODE:-paper}
+    command: ["/reporter"]
+    depends_on:
+      - nats
+
+  risk-state:
+    build:
+      context: .
+      dockerfile: Dockerfile.services
+    container_name: risk-state
+    restart: unless-stopped
+    environment:
+      APP_MODE: ${APP_MODE:-paper}
+    command: ["/risk_state"]
+    depends_on:
+      - nats
+
+  replay-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.services
+    container_name: replay-service
+    restart: unless-stopped
+    environment:
+      APP_MODE: ${APP_MODE:-replay}
+    command: ["/replay_service"]
+    depends_on:
+      - nats
+    volumes:
+      - ./sample_data:/app/sample_data:ro
+
+  prometheus:
+    image: prom/prometheus:v2.37.0
+    container_name: prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana:8.5.2
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:

@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+  - job_name: 'strategy-engine'
+    static_configs:
+      - targets: ['strategy-engine:8000']
+  - job_name: 'execution'
+    static_configs:
+      - targets: ['execution:8080']
+  - job_name: 'feature-engine'
+    static_configs:
+      - targets: ['feature-engine:8081']
+  - job_name: 'ops-api'
+    static_configs:
+      - targets: ['ops-api:8082']
+  - job_name: 'reporter'
+    static_configs:
+      - targets: ['reporter:8083']
+  - job_name: 'risk-state'
+    static_configs:
+      - targets: ['risk-state:8084']

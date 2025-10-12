@@ -1,0 +1,12 @@
+# Venue metadata placeholder
+venues:
+  - name: "bybit"
+    maker_rebate_bps: -1.0
+    taker_fee_bps: 7.0
+    supports_partial: true
+    supports_funding: true
+  - name: "binance"
+    maker_rebate_bps: -1.0
+    taker_fee_bps: 10.0
+    supports_partial: true
+    supports_funding: true

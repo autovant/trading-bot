@@ -1,0 +1,409 @@
+Awesome—here’s a single, copy-paste **MASTER BUILD PROMPT** you can drop into Abascus/Deep Agent (or any strong codegen agent) to generate the entire system from scratch. It’s opinionated, end-to-end, and includes specs, file trees, APIs, schemas, algorithms, tests, Docker/K8s/CI, and acceptance criteria.
+
+---
+
+# MASTER BUILD PROMPT (copy everything below)
+
+You are a senior platform+algo engineer. Generate a production-ready **monorepo** for a **crypto trading bot** that is **pair-agnostic**, **hands-off**, **containerized**, and **commercializable**. Build code, configs, and docs exactly as specified.
+
+## 0) Tech stack (hard requirements)
+
+* **Python 3.11** for: `strategy-engine`, `feature-engine`, `risk-state`, `ops-api`, `reporter`, `dash`.
+* **Go 1.22** (or Rust) for: `feed-handler`, `execution` (low-latency; use Go).
+* **Messaging:** NATS (JetStream off by default).
+* **DB:** Postgres 16 for orders/trades/positions/PnL ledger.
+* **UI:** Streamlit MVP (replaceable later) consuming **ops-api**.
+* **Backtests:** Python, vectorbt or backtrader (pick vectorbt if simpler).
+* **Containers:** Docker (distroless runtime for Python & Go).
+* **Orchestration:** Docker Compose (dev) + Kubernetes manifests (prod) with Kustomize overlays.
+* **Observability:** Prometheus metrics, Grafana dashboards; JSON logs.
+* **Config:** YAML + Pydantic validation; hot-reload via NATS “config.reload”.
+
+## 1) Strategy (functional spec)
+
+**Style:** Daily regime → 4h setup → 4h triggers (15m optional confirm).
+**Modules:** Trend pullback, Donchian breakout, optional range mean-reversion (MR).
+**Divergence:** RSI(14) primary, MACD histogram secondary; k-pivot=2–3; used for **confidence score** only.
+**Confidence score (0–100):**
+
+* Daily (40): 200-DMA & slope (+15), MACD hist>0 (+10), ATR% within band (+10), funding sane (+5).
+* 4h Setup (40): MA stack (+10), ADX regime (+10), location at structure (EMA20/VWAP/prev swing/Fib) (+10), volume uptick (+10).
+* Signals (20): RSI divergence (+8), MACD divergence (+5), 15m confirm (+7).
+* Penalties: spread/ATR% high, news/crisis, counter-div (−30 to −60).
+  **Score bands → behavior:**
+  ≥75 high / 55–74 mid / 45–54 low / <45 skip.
+
+**Entries:**
+
+* **Trend pullback (long):** 4h tags EMA20, closes >EMA20, RSI(14)>50. Optional 15m confirm.
+* **Breakout (long):** 4h close > Donchian(20) high + volume uptick, prefer VWAP reclaim.
+* **Range MR (long):** ADX(4h)<20 & %B<0.05 & RSI(2)<10 → to mid-band (no runner). (Off by default.)
+
+**Sizing (risk-based, pair-agnostic):**
+
+* Base risk/trade = 0.6% of equity ⇒ define 1R.
+* `Qty = (Equity × Risk%) / StopDistance$`, rounded to lot step; ensure minNotional; compute implied leverage.
+* Score multipliers: high ×1.33 (cap total ≤0.8%), mid ×1.0, low ×0.67, <45 skip.
+* Require **isolated margin**; liquidation distance ≥ **4× stop distance**.
+
+**Stops & exits:**
+
+* Initial stop: `max(structure, 1.5×ATR(14)) + 0.2×ATR` (anti-wick).
+* **Dual stops:** soft bot-managed on **composite price**; hard server-side reduce-only ≈2.5× soft distance.
+* TP1 +1R (40–60% off), stop→BE; trail runner with Chandelier (high 3.0×ATR, mid 2.5×, low 2.0×).
+* Timeout: if not +0.5R within 8 × 4h bars, scratch.
+
+**Ladder (pullbacks only; not breakout/MR):**
+
+* Levels: anchor, −0.5×ATR, −1.0×ATR.
+* Risk weights of total R\$: \[0.25, 0.35, 0.40].
+* Sizing per leg: `qty_i = (r_i * R$) / |entry_i − stop|`.
+* Cancel deeper legs if unrealized ≥ +0.5R or score decays.
+
+**Costs & microstructure gates:**
+
+* Spread/ATR% ≤ 10% (15% hard stop).
+* Rolling avg slippage ≤ 3 bps → else throttle/guarded.
+* Maker-first; use execution alpha (microprice & OFI) to avoid adverse selection.
+
+**Crash / Risk-OFF automation:**
+
+* Triggers (any): 1D drop > 3× ATR% (BTC), 4h drop > 2.5× ATR%, Spread/ATR% > 15%, acks p95 > 3× baseline, reject rate >2%, funding z-score extreme.
+* Actions: cancel all, reduce-only flatten; optional small inverse hedge; pause 12–24h.
+* Re-entry: regime restored & costs/health normal 24h.
+
+**Pair-agnostic requirements:**
+
+* Instrument registry (tick, step, minNotional, contractSize, linear/inverse).
+* Vol normalization (ATR%); min 400 Daily bars or block/fallback MA length.
+* Liquidity: depth ≥ 10× order notional; slippage budget OK.
+* Composite price for soft stops/SFP; correlation caps (global open risk ≤3R; ≤1.5R per bucket).
+
+**Acceptance KPIs (rolling 8 weeks, after costs):**
+
+* Profit Factor ≥ 1.4; Expectancy ≥ 0.20R; Max DD ≤ 12R.
+* Maker ≥ 60%; avg slippage ≤ 3 bps; zero liquidations; hard stop always present.
+
+## 2) Repository & files to generate
+
+```
+trading-bot/
+  README.md
+  STRATEGY.md
+  LICENSE
+  configs/
+    strategy.config.yaml
+    risk.config.yaml
+    venues.config.yaml
+  services/
+    feed-handler/              # Go
+      cmd/main.go
+      go.mod go.sum
+      internal/venues/*.go
+      Dockerfile
+    feature-engine/            # Python
+      feature_engine/
+        __init__.py
+        main.py
+        microstructure.py  # microprice, OFI, CVD, spread/ATR%
+        metrics.py         # Prometheus
+      pyproject.toml
+      Dockerfile
+    strategy-engine/           # Python
+      strategy_engine/
+        __init__.py
+        main.py           # driver; subscribes features; publishes intents
+        config.py         # Pydantic models & validation
+        indicators.py
+        signals.py        # regime/setup/trigger + Donchian + MR (off by default)
+        divergence.py     # k-pivot logic, location filters
+        scoring.py        # confidence score
+        sizing.py
+        stops.py          # dual-stop controller (soft/hard)
+        ladder.py
+        costs.py          # spread/ATR gates, slippage budgets
+        state.py          # ON/GUARDED/RISK_OFF/CRISIS
+        io_ccxt.py        # bar fetching for research
+        metrics.py        # Prometheus
+      tests/
+        test_sizing.py
+        test_divergence.py
+        test_scoring.py
+      pyproject.toml
+      Dockerfile
+    execution/                 # Go
+      cmd/main.go
+      internal/exec/router.go      # maker-first, reduce-only exits
+      internal/exec/nats.go
+      internal/exec/venues/*.go
+      internal/exec/ids.go         # idempotent clientOrderIds
+      internal/exec/health.go
+      Dockerfile
+    risk-state/               # Python
+      risk_state/
+        __init__.py
+        main.py        # exposure caps, circuit breakers, CRISIS mode
+        metrics.py
+      pyproject.toml
+      Dockerfile
+    ops-api/                 # FastAPI
+      app/main.py
+      app/jobs.py        # PnL rollup job
+      app/models.py      # SQLAlchemy OPTIONAL (or asyncpg direct)
+      app/security.py    # placeholder for auth; disabled by default
+      pyproject.toml
+      Dockerfile
+    reporter/               # Python
+      reporter/
+        __init__.py
+        daily_report.py   # HTML (Jinja2)
+        metrics.py
+      templates/report.html.j2
+      pyproject.toml
+      Dockerfile
+    dash/                   # Streamlit
+      app.py
+      requirements.txt
+      Dockerfile
+  tools/
+    runner/
+      backtest.py
+      ablate.py
+      replay.py
+      report.py
+  db/
+    schema.sql
+    migrations/ (optional Alembic)
+  deploy/
+    compose/docker-compose.yml
+    compose/docker-compose.dev.yml
+    k8s/base/*.yaml           # Deployments, Services, ConfigMap, Secrets, PDB, PriorityClass
+    k8s/overlays/prod/kustomization.yaml
+  .vscode/
+    tasks.json
+    launch.json
+  .pre-commit-config.yaml
+  .gitignore
+  .devcontainer/devcontainer.json
+  .github/workflows/
+    build.yml
+    scan.yml
+```
+
+## 3) Concrete contents to implement
+
+### 3.1 configs/strategy.config.yaml (seed)
+
+```yaml
+symbols: ["BTC/USDT","ETH/USDT"]
+timeframes: { regime: "1d", setup: "4h", trigger: "15m" }
+risk:
+  risk_per_trade_pct: 0.006
+  stop_atr_mult: 1.5
+  trail_atr_mult: { high: 3.0, mid: 2.5, low: 2.0 }
+  daily_dd_stop_r: -3
+  max_open_risk_r: 3
+costs: { fee_bps: 7, slippage_bps: 3, spread_atr_max_pct: 0.10 }
+score_weights:
+  daily: { ma_slope: 15, macd_hist: 10, atr_band: 10, funding: 5 }
+  setup: { ma_stack: 10, adx_regime: 10, location: 10, volume: 10 }
+  signals: { rsi_div: 8, macd_div: 5, ltf_confirm: 7 }
+  penalties: { liquidity: 30, news: 40, counter_div: 40 }
+ladder:
+  enabled: true
+  levels_atr: [0.0, 0.5, 1.0]
+  risk_weights: [0.25, 0.35, 0.40]
+  max_legs: 3
+execution:
+  post_only: true
+  reduce_only: true
+  retry: 2
+  ofi_window_ms: 2000
+  microprice_ticks: 1
+crisis:
+  daily_atr_sigma: 3.0
+  h4_atr_sigma: 2.5
+  ack_latency_x: 3
+  reject_rate_pct: 2
+  funding_z: 3
+```
+
+### 3.2 db/schema.sql (exact)
+
+```sql
+CREATE TABLE IF NOT EXISTS orders (
+  id BIGSERIAL PRIMARY KEY,
+  client_id TEXT UNIQUE NOT NULL,
+  venue TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  side TEXT NOT NULL,
+  type TEXT NOT NULL,
+  price NUMERIC,
+  qty NUMERIC NOT NULL,
+  filled_qty NUMERIC NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  reduce_only BOOLEAN DEFAULT FALSE,
+  fee_bps NUMERIC DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS trades (
+  id BIGSERIAL PRIMARY KEY,
+  order_id BIGINT REFERENCES orders(id),
+  venue TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  side TEXT NOT NULL,
+  price NUMERIC NOT NULL,
+  qty NUMERIC NOT NULL,
+  fee_quote NUMERIC NOT NULL DEFAULT 0,
+  pnl_quote NUMERIC NOT NULL DEFAULT 0,
+  r_value NUMERIC NOT NULL DEFAULT 0,
+  ts TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS positions (
+  venue TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  qty NUMERIC NOT NULL,
+  avg_price NUMERIC NOT NULL,
+  stop_price NUMERIC,
+  liq_price NUMERIC,
+  last_price NUMERIC,
+  u_pnl_quote NUMERIC DEFAULT 0,
+  u_pnl_r NUMERIC DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (venue, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS pnl_ledger (
+  asof_date DATE PRIMARY KEY,
+  realized_quote NUMERIC NOT NULL,
+  unrealized_quote NUMERIC NOT NULL,
+  fees_quote NUMERIC NOT NULL,
+  equity_quote NUMERIC NOT NULL,
+  trades_r NUMERIC NOT NULL,
+  dd_r NUMERIC NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS config_versions (
+  id BIGSERIAL PRIMARY KEY,
+  version TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  status TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+### 3.3 NATS subjects (contract)
+
+* `ticks.<venue>.<symbol>` → L2/trades snapshots (feed-handler → feature-engine).
+* `features.<symbol>` → JSON: microprice tilt, OFI, CVD, spread/ATR%, funding z.
+* `signals.intents` → new entry/exit intents (strategy-engine → execution).
+* `orders.events` → order acks/fills/cancels (execution → strategy/ops-api).
+* `risk.state` → ON/GUARDED/RISK\_OFF/CRISIS changes.
+* `config.reload` → signal to reload YAML on all services.
+
+### 3.4 Execution Alpha (Go)
+
+Implement:
+
+* **OFI** over 1–3s, **microprice** calculation, **queue depth** checks.
+* Maker-first placement; cancel/repost one tick better only if spread within budget and adverse OFI not present.
+* Reduce-only exits for stops/TPs. Idempotent `clientOrderId`.
+
+### 3.5 Strategy algorithms (Python)
+
+* **Indicators:** EMA20/50/200, ADX(14), ATR(14), Donchian(20), RSI(14), BB(20,2) %B, MACD(12,26,9).
+* **Regime:** Daily close>200-DMA, 200-DMA slope>0 (5-bar Δ>0), MACD hist>0.
+* **Setup:** 4h EMA stack & ADX≥20 & VWAP reclaim; MR if ADX<20.
+* **Triggers:** pullback or Donchian breakout (as above).
+* **Divergence:** k-pivot confirmed; only counts if at structure.
+* **Scoring:** weights above; penalties; clip 0–100.
+* **Ladder sizing:** fixed total R\$; leg sizing formula.
+* **Stops:** soft composite stop + hard server-side; approach-band 0.1×ATR one-bar grace if spread spike but OFI neutral (anti-wick).
+* **Crash:** triggers set state→RISK\_OFF; pause new entries; flatten reduce-only.
+
+### 3.6 Ops API (FastAPI)
+
+Endpoints (JSON):
+
+* `GET /api/positions` → live positions.
+* `GET /api/pnl/daily?days=30` → ledger (realized, unrealized, fees, equity, R, DD).
+* `GET /api/trades?limit=200`
+* `GET /api/config` → effective YAML.
+* `POST /api/config/stage` → patch limited safe knobs (risk %, stop ATR mult, spread budget); write to `config_versions`.
+* `POST /api/config/apply/{version}` → write YAML & publish `config.reload`.
+  Background job: **hourly** rollup to `pnl_ledger`.
+
+### 3.7 Dash (Streamlit)
+
+Panels:
+
+* Positions grid (qty, avg, stop, liq distance, uPnL quote & R).
+* PnL charts (equity curve, daily realized).
+* Recent trades table.
+* Config form (safe knobs) → POST stage/apply.
+
+### 3.8 Docker & Compose (dev + prod)
+
+* Python: multi-stage to **distroless** runtime, non-root.
+* Go: static build to distroless.
+* `deploy/compose/docker-compose.yml` with postgres, nats, strategy-engine, execution, feature-engine, ops-api, dash, reporter, prometheus, grafana. Use **Docker secrets** for venue keys.
+* `.vscode/tasks.json` with **test**, **run-engine**, **docker\:up**.
+
+### 3.9 Kubernetes (Kustomize)
+
+* Deployments for each service, Prometheus annotations, PriorityClass `trading-critical`, read-only FS, non-root, drop caps.
+* ConfigMap for configs; Secret for DSNs/keys; PDB; anti-affinity; dedicated node pool (tolerations).
+* Resource requests=limits (avoid throttling) for latency-sensitive services.
+
+### 3.10 CI/CD (GitHub Actions)
+
+* **Build & push** images to GHCR; **Trivy scan**; **Cosign sign** (stub if not configured).
+* Lint (ruff, mypy) + pytest.
+* Optional: deploy overlay via `kustomize build | kubectl apply` (behind env flag).
+
+### 3.11 Tests (at minimum)
+
+* `test_sizing.py` — exact qty calc & rounding; liquidation distance rule satisfied.
+* `test_divergence.py` — k-pivot non-repainting; location filter gating.
+* `test_scoring.py` — score increases with regime/setup/signal features; penalties apply.
+* Backtest CLI returns PF, Expectancy R, Max DD; ablation script ensures +divergence/+score don’t degrade OOS.
+
+## 4) Security & secrets
+
+* No keys in images. Read from env or mounted secrets.
+* Strategy & execution must **fail closed** (no entries if keys missing; keep hard stop).
+* Logs redact secrets.
+
+## 5) Developer ergonomics
+
+* DevContainer config for VS Code.
+* `README.md` with 10-minute quickstart:
+
+  1. `docker compose up --build`
+  2. open Streamlit at `http://localhost:8501`
+  3. run backtest: `python tools/runner/backtest.py --config configs/strategy.config.yaml`
+* `STRATEGY.md` explaining rules, score, risk, ladders, stops, crash logic.
+
+## 6) Acceptance checklist (build must pass)
+
+* Repo builds all services locally and via CI.
+* Compose stack comes up; ops-api responds; dash loads; dummy trades can be inserted and displayed.
+* Backtest CLI prints JSON with **PF/Expectancy/MaxDD**; ablation runs.
+* Prometheus endpoints expose metrics (maker%, slippage bps, signal→ack latency, circuit-breaker hits).
+* Config patch → stage → apply → strategy reload confirmed.
+
+## 7) Nice-to-have (implement if small)
+
+* Shadow backtest (what strategy should do vs did) to validate slippage & fills.
+* SFP detector (swing failure pattern) as optional module (off by default).
+* Basic Grafana dashboard JSON.
+
+**Deliver exactly this repository with working code and placeholders where exchanges require keys. Keep modules small, typed, and tested.**
+
+---
+
+# END MASTER BUILD PROMPT

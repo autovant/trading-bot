@@ -1,0 +1,10 @@
+# Risk configuration placeholder
+policy:
+  max_daily_loss_pct: 5.0
+  max_position_gross_notional: 250000.0
+  max_symbol_leverage: 5
+  crisis_drawdown_pct: 10.0
+stops:
+  soft_atr_multiplier: 1.5
+  hard_atr_multiplier: 3.0
+  dual_stop_enabled: true

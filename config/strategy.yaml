@@ -1,0 +1,162 @@
+# Trading Bot Configuration
+# Copy this file and customize for your setup
+
+app_mode: "paper"   # "live" | "paper" | "replay"
+shadow_paper: false
+
+# Exchange Configuration
+exchange:
+  name: "bybit"  # Using Bybit as fallback since Zoomex has no public API
+  api_key: "${EXCHANGE_API_KEY}"
+  secret_key: "${EXCHANGE_SECRET_KEY}"
+  passphrase: "${EXCHANGE_PASSPHRASE}"
+  testnet: true
+  base_url: "https://api-testnet.bybit.com"
+
+# Trading Configuration
+trading:
+  initial_capital: 1000.0
+  risk_per_trade: 0.006  # 0.6%
+  max_positions: 3
+  max_daily_risk: 0.05  # 5%
+  max_sector_exposure: 0.20  # 20%
+  
+  # Symbols to trade
+  symbols:
+    - "BTCUSDT"
+    - "ETHUSDT"
+    - "SOLUSDT"
+
+# Strategy Parameters
+strategy:
+  # Regime Detection (Daily)
+  regime:
+    ema_period: 200
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    weight: 0.25
+
+  # Setup Detection (4H)
+  setup:
+    ema_fast: 8
+    ema_medium: 21
+    ema_slow: 55
+    adx_period: 14
+    adx_threshold: 25
+    atr_period: 14
+    atr_multiplier: 2.0
+    weight: 0.30
+
+  # Signal Generation (1H)
+  signals:
+    rsi_period: 14
+    rsi_oversold: 40
+    rsi_overbought: 60
+    donchian_period: 20
+    divergence_lookback: 3
+    weight: 0.35
+
+  # Confidence Scoring
+  confidence:
+    min_threshold: 50
+    full_size_threshold: 70
+    crisis_threshold: 80
+    penalties:
+      high_volatility: -3
+      low_volume: -3
+      conflicting_timeframes: -4
+
+# Risk Management
+risk_management:
+  # Position Sizing
+  ladder_entries:
+    weights: [0.25, 0.35, 0.40]
+    confirmation_bars: 2
+    momentum_bars: 4
+
+  # Stop Loss System
+  stops:
+    soft_atr_multiplier: 1.5
+    hard_risk_percent: 0.02
+    time_based_hours: 48
+    trail_atr_multiplier: 1.0
+
+  # Crisis Mode
+  crisis_mode:
+    drawdown_threshold: 0.10
+    consecutive_losses: 3
+    volatility_multiplier: 3.0
+    position_size_reduction: 0.50
+
+# Data Configuration
+data:
+  timeframes:
+    signal: "1h"
+    setup: "4h"
+    regime: "1d"
+  
+  lookback_periods:
+    signal: 200
+    setup: 100
+    regime: 50
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  file: "logs/trading.log"
+  max_size: "10MB"
+  backup_count: 5
+
+# Database Configuration
+database:
+  path: "data/trading.db"
+  backup_interval: 3600  # seconds
+
+# Backtesting Configuration
+backtesting:
+  slippage: 0.0005
+  commission: 0.001
+  initial_balance: 1000.0
+
+# Paper Trading Configuration
+paper:
+  fee_bps: 7
+  maker_rebate_bps: -1
+  funding_enabled: true
+  slippage_bps: 3
+  max_slippage_bps: 10
+  latency_ms:
+    mean: 120
+    p95: 300
+  partial_fill:
+    enabled: true
+    min_slice_pct: 0.15
+    max_slices: 4
+  price_source: "live"
+
+# Replay Configuration
+replay:
+  source: "parquet://bars/"
+  speed: "10x"
+  start: "2023-01-01"
+  end: "2024-12-31"
+
+# Dashboard Configuration
+dashboard:
+  refresh_interval: 5  # seconds
+  chart_periods: 100
+  max_trades_display: 50
+
+# Messaging Configuration
+messaging:
+  servers:
+    - "nats://localhost:4222"
+  subjects:
+    market_data: "market.data"
+    orders: "trading.orders"
+    positions: "trading.positions"
+    executions: "trading.executions"
+    executions_shadow: "trading.executions.shadow"
+    risk: "risk.management"
+    performance: "performance.metrics"
