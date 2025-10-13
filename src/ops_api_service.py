@@ -8,6 +8,7 @@ and provide richer introspection without requiring a Go toolchain locally.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections import defaultdict
 from datetime import datetime
@@ -29,8 +30,11 @@ from .config import (
     reload_config,
 )
 from .database import DatabaseManager
+from .messaging import MessagingClient
 
 MODES: List[APP_MODE] = ["live", "paper", "replay"]
+
+logger = logging.getLogger(__name__)
 
 
 class ModeRequest(BaseModel):
@@ -158,6 +162,8 @@ app = FastAPI(title="Trading Ops API", version="2.0.0")
 _config_lock = asyncio.Lock()
 _config: Optional[TradingBotConfig] = None
 _database: Optional[DatabaseManager] = None
+_messaging: Optional[MessagingClient] = None
+_rollup_task: Optional[asyncio.Task[None]] = None
 
 _trading_mode_metric = Gauge(
     "trading_mode",
@@ -186,6 +192,12 @@ def _update_trading_mode_metric(mode: APP_MODE) -> None:
         _trading_mode_metric.labels(mode=candidate).set(1 if candidate == mode else 0)
 
 
+def _resolve_subject(name: str, default: str) -> str:
+    if _config and name in _config.messaging.subjects:
+        return _config.messaging.subjects[name]
+    return default
+
+
 def _load_strategy_yaml() -> Dict[str, Any]:
     path = _strategy_config_path()
     if not path.exists():
@@ -209,9 +221,45 @@ def _isoformat_or_none(value: Optional[datetime]) -> Optional[str]:
     return value.isoformat()
 
 
+async def _publish_config_reload(version: str, config_body: Dict[str, Any]) -> None:
+    if not _messaging:
+        logger.info("Skipping config.reload publish; messaging not available")
+        return
+
+    subject = _resolve_subject("config_reload", "config.reload")
+    payload = {
+        "version": version,
+        "mode": _config.app_mode if _config else None,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    try:
+        await _messaging.publish(subject, payload)
+    except Exception as exc:  # pragma: no cover - best effort logging
+        logger.error("Failed to publish config.reload notification: %s", exc)
+
+
+async def _pnl_rollup_loop(interval_seconds: int = 3600) -> None:
+    while True:
+        try:
+            database = await _ensure_database()
+            summaries = await database.aggregate_daily_pnl(days=60)
+            for entry in summaries:
+                await database.add_pnl_entry(entry)
+        except asyncio.CancelledError:
+            raise
+        except HTTPException:
+            # Database not ready; skip this cycle.
+            await asyncio.sleep(interval_seconds)
+            continue
+        except Exception as exc:  # pragma: no cover - diagnostic logging
+            logger.error("PnL rollup task failed: %s", exc)
+
+        await asyncio.sleep(interval_seconds)
+
+
 @app.on_event("startup")
 async def startup() -> None:
-    global _config, _database
+    global _config, _database, _messaging, _rollup_task
 
     _config = get_config()
     _update_trading_mode_metric(_config.app_mode)
@@ -219,10 +267,40 @@ async def startup() -> None:
     _database = DatabaseManager(_config.database.path)
     await _database.initialize()
 
+    messaging_config = {"servers": _config.messaging.servers}
+    _messaging = MessagingClient(messaging_config)
+    try:
+        await _messaging.connect()
+    except Exception as exc:  # pragma: no cover - best effort logging
+        logger.warning("Unable to connect to NATS for config reloads: %s", exc)
+        _messaging = None
+
+    try:
+        initial_rollup = await _database.aggregate_daily_pnl(days=60)
+        for entry in initial_rollup:
+            await _database.add_pnl_entry(entry)
+    except Exception as exc:  # pragma: no cover - best effort logging
+        logger.warning("Initial PnL rollup failed: %s", exc)
+
+    _rollup_task = asyncio.create_task(_pnl_rollup_loop())
+
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    global _database
+    global _database, _messaging, _rollup_task
+
+    if _rollup_task:
+        _rollup_task.cancel()
+        try:
+            await _rollup_task
+        except asyncio.CancelledError:
+            pass
+        _rollup_task = None
+
+    if _messaging:
+        await _messaging.close()
+    _messaging = None
+
     if _database:
         await _database.close()
     _database = None
@@ -352,11 +430,31 @@ async def get_pnl_daily(
         }
     )
     bucket_modes: Dict[str, APP_MODE] = {}
+    rollup_days: Dict[str, bool] = {}
 
     for entry in entries:
         if entry.timestamp is None:
             continue
         bucket = entry.timestamp.date().isoformat()
+        trade_id = getattr(entry, "trade_id", "") or ""
+        if trade_id.startswith("rollup-"):
+            grouped[bucket] = {
+                "realized_pnl": round(entry.realized_pnl, 6),
+                "unrealized_pnl": round(entry.unrealized_pnl, 6),
+                "fees": round(entry.fees, 6),
+                "funding": round(entry.funding, 6),
+                "commission": round(entry.commission, 6),
+                "net_pnl": round(entry.net_pnl, 6),
+                "balance": round(entry.balance, 6),
+            }
+            bucket_modes[bucket] = entry.mode
+            rollup_days[bucket] = True
+            continue
+
+        if rollup_days.get(bucket):
+            # Skip granular rows once an authoritative rollup exists.
+            continue
+
         bucket_stats = grouped[bucket]
         bucket_stats["realized_pnl"] += entry.realized_pnl
         bucket_stats["unrealized_pnl"] += entry.unrealized_pnl
@@ -582,6 +680,8 @@ async def apply_config(version: str) -> ConfigStageResponse:
         )
         _config = reload_config()
         _update_trading_mode_metric(_config.app_mode)
+
+        await _publish_config_reload(version, candidate)
 
         return ConfigStageResponse(
             version=version,

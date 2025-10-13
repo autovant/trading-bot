@@ -160,3 +160,4 @@ messaging:
     executions_shadow: "trading.executions.shadow"
     risk: "risk.management"
     performance: "performance.metrics"
+    config_reload: "config.reload"

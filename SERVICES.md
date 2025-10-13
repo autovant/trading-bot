@@ -51,6 +51,7 @@ The trading bot uses a microservices architecture with NATS messaging for commun
 - `risk.management` - Risk management commands
 - `risk.state` - Risk state updates
 - `performance.metrics` - Performance metrics
+- `config.reload` - Broadcast configuration reload notification
 - `reports.performance` - Performance reports
 
 ### Message Format

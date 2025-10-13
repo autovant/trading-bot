@@ -1,6 +1,7 @@
 [
   "test_integration.py::test_integration",
   "test_messaging.py::test_messaging",
+  "tests/test_database_rollup.py::test_aggregate_daily_pnl_rollup",
   "tests/test_paper_broker.py::test_latency_sampler_properties",
   "tests/test_paper_broker.py::test_limit_order_partial_fill",
   "tests/test_paper_broker.py::test_market_order_slippage_and_fees",

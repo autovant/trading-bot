@@ -801,6 +801,71 @@ class DatabaseManager:
     # PnL Ledger
     # --------------------------------------------------------------------- #
 
+    async def aggregate_daily_pnl(self, days: int = 60) -> List[PnLEntry]:
+        entries = await self.get_pnl_history(days=days)
+        if not entries:
+            return []
+
+        buckets: Dict[tuple[str, Mode, str], Dict[str, Any]] = {}
+
+        for entry in entries:
+            if entry.trade_id and entry.trade_id.startswith("rollup-"):
+                continue
+            if entry.timestamp is None:
+                continue
+
+            key = (entry.timestamp.date().isoformat(), entry.mode, entry.run_id)
+            bucket = buckets.setdefault(
+                key,
+                {
+                    "realized_pnl": 0.0,
+                    "unrealized_pnl": 0.0,
+                    "commission": 0.0,
+                    "fees": 0.0,
+                    "funding": 0.0,
+                    "net_pnl": 0.0,
+                    "balance": 0.0,
+                    "latest_ts": entry.timestamp,
+                },
+            )
+
+            bucket["realized_pnl"] += entry.realized_pnl
+            bucket["unrealized_pnl"] += entry.unrealized_pnl
+            bucket["commission"] += entry.commission
+            bucket["fees"] += entry.fees
+            bucket["funding"] += entry.funding
+            bucket["net_pnl"] += entry.net_pnl
+
+            if entry.timestamp >= bucket["latest_ts"]:
+                bucket["latest_ts"] = entry.timestamp
+                bucket["balance"] = entry.balance
+
+        summaries: List[PnLEntry] = []
+        for (day, mode, run_id), stats in buckets.items():
+            timestamp = stats["latest_ts"].replace(
+                hour=23, minute=59, second=59, microsecond=0
+            )
+            trade_id = f"rollup-{mode}-{run_id}-{day}"
+            summaries.append(
+                PnLEntry(
+                    symbol="ALL",
+                    trade_id=trade_id,
+                    realized_pnl=stats["realized_pnl"],
+                    unrealized_pnl=stats["unrealized_pnl"],
+                    commission=stats["commission"],
+                    fees=stats["fees"],
+                    funding=stats["funding"],
+                    net_pnl=stats["net_pnl"],
+                    balance=stats["balance"],
+                    mode=mode,
+                    run_id=run_id,
+                    timestamp=timestamp,
+                )
+            )
+
+        summaries.sort(key=lambda item: item.timestamp or datetime.utcnow())
+        return summaries
+
     async def add_pnl_entry(self, entry: PnLEntry) -> Optional[int]:
         if not self.connection:
             return None

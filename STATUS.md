@@ -9,6 +9,7 @@
 - Rebuilt the Ops API with config staging/apply endpoints plus positions/trades snapshots backed by SQLite `config_versions` for auditability.
 - Hardened the NATS messaging client with exponential backoff, auto-resubscribe, and graceful shutdown so FastAPI services survive transient broker outages.
 - Persisted risk snapshots, exposed them via the Ops API, and updated the Streamlit dashboard with replay pause/resume controls plus live risk metrics.
+- Wired the FastAPI ops API to publish `config.reload` on every applied version and added an hourly PnL ledger rollup that keeps `/api/pnl/daily` aligned with the trade history.
 
 ## Pending / Next Steps
 1. **Runtime validation**
