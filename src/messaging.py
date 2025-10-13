@@ -5,23 +5,30 @@ NATS messaging system for inter-service communication.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - typing aides
+    from nats.aio.msg import Msg as MsgT
+    from nats.aio.subscription import Subscription as SubscriptionT
+    from nats.js import JetStreamContext as JetStreamContextT
+else:
+    MsgT = Any
+    SubscriptionT = Any
+    JetStreamContextT = Any
 
 try:
-    from nats.js import JetStreamContext
-    from nats.aio.client import Client as NATS
-    from nats.aio.msg import Msg
-    from nats.aio.subscription import Subscription
-
-    NATS_AVAILABLE = True
+    _nats_client_module = importlib.import_module("nats.aio.client")
+    _nats_js_module = importlib.import_module("nats.js")
+    _NATSClientFactory = getattr(_nats_client_module, "Client", None)
+    _JetStreamContextFactory = getattr(_nats_js_module, "JetStreamContext", None)
+    NATS_AVAILABLE = bool(_NATSClientFactory)
 except ImportError:  # pragma: no cover - optional dependency
+    _NATSClientFactory = None
+    _JetStreamContextFactory = None
     NATS_AVAILABLE = False
-    JetStreamContext = Any  # type: ignore[assignment]
-    NATS = Any  # type: ignore[assignment]
-    Msg = Any  # type: ignore[assignment]
-    Subscription = Any  # type: ignore[assignment]
     logging.warning("NATS client not available. Messaging will be disabled.")
 
 logger = logging.getLogger(__name__)
@@ -32,12 +39,14 @@ class MessagingClient:
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.nc: Optional[NATS] = NATS() if NATS_AVAILABLE else None
-        self.js: Optional[JetStreamContext] = None
+        self.nc: Optional[Any] = (
+            _NATSClientFactory() if callable(_NATSClientFactory) else None
+        )
+        self.js: Optional[JetStreamContextT] = None
         self.connected = False
 
-        self.subscribers: Dict[str, Subscription] = {}
-        self._callbacks: Dict[str, Callable[[Msg], Awaitable[None]]] = {}
+        self.subscribers: Dict[str, SubscriptionT] = {}
+        self._callbacks: Dict[str, Callable[[MsgT], Awaitable[None]]] = {}
         self._connect_lock = asyncio.Lock()
         self._needs_restore = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -62,7 +71,7 @@ class MessagingClient:
 
     def _compute_backoff(self, attempt: int) -> float:
         exponent = max(attempt, 0)
-        delay = self._initial_backoff * (2 ** exponent)
+        delay = self._initial_backoff * (2**exponent)
         return min(delay, self._max_backoff)
 
     async def _restore_subscriptions(self) -> None:
@@ -77,9 +86,7 @@ class MessagingClient:
                 subscription = await self.nc.subscribe(subject, cb=handler)
                 self.subscribers[subject] = subscription
             except Exception as exc:  # pragma: no cover - best effort logging
-                logger.error(
-                    "Failed to restore subscription for %s: %s", subject, exc
-                )
+                logger.error("Failed to restore subscription for %s: %s", subject, exc)
         self._needs_restore = False
 
     async def _ensure_connection(self) -> bool:
@@ -104,7 +111,12 @@ class MessagingClient:
             return
 
         if self.nc is None:
-            self.nc = NATS()
+            if not callable(_NATSClientFactory):
+                logger.warning(
+                    "NATS client factory unavailable; messaging disabled."
+                )
+                return
+            self.nc = _NATSClientFactory()
 
         if self.connected and self._is_nc_connected():
             return
@@ -228,6 +240,11 @@ class MessagingClient:
             if not await self._ensure_connection():
                 logger.warning("Unable to publish to %s; NATS unavailable.", subject)
                 return
+            if self.nc is None:
+                logger.warning(
+                    "Publishing aborted for %s; NATS client not initialised.", subject
+                )
+                return
 
             try:
                 await self.nc.publish(subject, payload)
@@ -253,18 +270,23 @@ class MessagingClient:
                 await asyncio.sleep(delay)
 
     async def subscribe(
-        self, subject: str, callback: Callable[[Msg], Awaitable[None] | None]
-    ) -> Optional[Subscription]:
+        self, subject: str, callback: Callable[[MsgT], Awaitable[None] | None]
+    ) -> Optional[SubscriptionT]:
         """Subscribe to a subject."""
         if not NATS_AVAILABLE:
-            logger.warning("NATS client not available. Cannot subscribe to %s.", subject)
+            logger.warning(
+                "NATS client not available. Cannot subscribe to %s.", subject
+            )
             return None
 
         if not await self._ensure_connection():
             logger.warning("Unable to subscribe to %s; NATS unavailable.", subject)
             return None
+        if self.nc is None:
+            logger.warning("Subscription aborted for %s; NATS client missing.", subject)
+            return None
 
-        async def message_handler(msg: Msg):
+        async def message_handler(msg: MsgT):
             try:
                 result = callback(msg)
                 if asyncio.iscoroutine(result):
@@ -311,7 +333,14 @@ class MessagingClient:
         while attempts < total_attempts:
             attempts += 1
             if not await self._ensure_connection():
-                logger.warning("Unable to submit request to %s; NATS unavailable.", subject)
+                logger.warning(
+                    "Unable to submit request to %s; NATS unavailable.", subject
+                )
+                return None
+            if self.nc is None:
+                logger.warning(
+                    "Request aborted for %s; NATS client not initialised.", subject
+                )
                 return None
 
             try:
@@ -319,9 +348,7 @@ class MessagingClient:
                 try:
                     return json.loads(response.data)
                 except json.JSONDecodeError as exc:
-                    logger.error(
-                        "Failed to decode response from %s: %s", subject, exc
-                    )
+                    logger.error("Failed to decode response from %s: %s", subject, exc)
                     return None
             except asyncio.TimeoutError:
                 logger.warning("Request to %s timed out after %.2fs", subject, timeout)

@@ -134,6 +134,9 @@ paper:
     min_slice_pct: 0.15
     max_slices: 4
   price_source: "live"
+  max_leverage: 5
+  initial_margin_pct: 0.1
+  maintenance_margin_pct: 0.005
 
 # Replay Configuration
 replay:

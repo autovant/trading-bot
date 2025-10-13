@@ -32,7 +32,7 @@ A production-ready cryptocurrency trading bot with advanced strategy implementat
 
 2. **Open the dashboard**
 
-   Visit `http://localhost:8501` — the header badge should display `MODE: PAPER`. Use the Paper Config panel to tune latency, slippage, fees, and partial-fill behaviour; changes are applied via the ops-api.
+   Visit `http://localhost:8501` — the header badge should display `MODE: PAPER`. Use the Paper Config panel to tune latency, slippage, fees, partial-fill behaviour, and margin guardrails (max_leverage, initial_margin_pct, maintenance_margin_pct); changes are applied via the ops-api.
 
 3. **Backtest and replay the strategy**
 
@@ -55,7 +55,7 @@ Edit `config/strategy.yaml` to customize:
 - Trading parameters
 - Risk management settings
 - Strategy weights and thresholds
-- Paper trading and replay settings
+- Paper trading and replay settings (fees, slippage, latency, partial fills, margin guardrails)
 
 ## Architecture
 

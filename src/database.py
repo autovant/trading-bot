@@ -765,9 +765,7 @@ class DatabaseManager:
             logger.error("Error fetching config version %s: %s", version, exc)
             return None
 
-    async def list_config_versions(
-        self, limit: int = 20
-    ) -> List[ConfigVersion]:
+    async def list_config_versions(self, limit: int = 20) -> List[ConfigVersion]:
         if not self.connection:
             return []
 
@@ -795,7 +793,6 @@ class DatabaseManager:
         except Exception as exc:
             logger.error("Error listing config versions: %s", exc)
             return []
-
 
     # --------------------------------------------------------------------- #
     # PnL Ledger

@@ -300,12 +300,19 @@ class PaperConfig(StrictModel):
     latency_ms: LatencyConfig = Field(default_factory=LatencyConfig)
     partial_fill: PartialFillConfig = Field(default_factory=PartialFillConfig)
     price_source: PRICE_SOURCE = "live"
+    max_leverage: float = Field(default=5.0, ge=1.0)
+    initial_margin_pct: float = Field(default=0.1, ge=0, le=1)
+    maintenance_margin_pct: float = Field(default=0.005, ge=0, le=1)
     seed: int = Field(default=1337, ge=0)
 
     @model_validator(mode="after")
     def _validate_slippage(self) -> "PaperConfig":
         if self.max_slippage_bps < self.slippage_bps:
             raise ValueError("max_slippage_bps must be >= slippage_bps")
+        if self.initial_margin_pct < self.maintenance_margin_pct:
+            raise ValueError(
+                "initial_margin_pct must be greater than or equal to maintenance_margin_pct"
+            )
         return self
 
 

@@ -245,7 +245,9 @@ def main():
         if last_action_at:
             try:
                 ts = pd.to_datetime(last_action_at)
-                st.caption(f"Last action: {last_action or 'n/a'} @ {ts:%Y-%m-%d %H:%M:%S}")
+                st.caption(
+                    f"Last action: {last_action or 'n/a'} @ {ts:%Y-%m-%d %H:%M:%S}"
+                )
             except Exception:
                 st.caption(f"Last action: {last_action or 'n/a'}")
 

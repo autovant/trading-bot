@@ -16,17 +16,11 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from fastapi import FastAPI
-from prometheus_client import Gauge
 
 from ..config import TradingBotConfig, load_config
+from ..metrics import SPREAD_ATR_PCT
 from ..messaging import MessagingClient
 from .base import BaseService, create_app
-
-SPREAD_ATR_GAUGE = Gauge(
-    "market_spread_atr_percent",
-    "Simulated spread expressed as percentage of ATR",
-    ["symbol"],
-)
 
 
 class FeedService(BaseService):
@@ -94,7 +88,10 @@ class FeedService(BaseService):
         funding = 0.0001 * math.sin(datetime.now(timezone.utc).timestamp())
         ofi = (bid_size - ask_size) * spread
 
-        SPREAD_ATR_GAUGE.labels(symbol=symbol).set((spread / max(atr, 1.0)) * 100)
+        mode = self.config.app_mode if self.config else "paper"
+        SPREAD_ATR_PCT.labels(mode=mode, symbol=symbol).set(
+            (spread / max(atr, 1.0)) * 100
+        )
         self._last_price[symbol] = price
         self._atr[symbol] = atr
 

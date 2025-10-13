@@ -10,6 +10,7 @@ fees, funding accrual, and queue dynamics.  All events are persisted through
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 import logging
 import math
 import random
@@ -18,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, cast
 
-from .config import PaperConfig
+from .config import PaperConfig, RiskManagementConfig
 from .database import DatabaseManager, Order, PnLEntry, Position, Trade
 from .metrics import AVERAGE_SLIPPAGE_BPS, MAKER_RATIO, SIGNAL_ACK_LATENCY
 
@@ -107,6 +108,7 @@ class PaperBroker:
         mode: Mode,
         run_id: str,
         initial_balance: float,
+        risk_config: Optional[RiskManagementConfig] = None,
         execution_listener: Optional[
             Callable[[Dict[str, Any]], Awaitable[None]]
         ] = None,
@@ -129,9 +131,19 @@ class PaperBroker:
         )
         self._order_progress: Dict[str, float] = {}
         self._random = random.Random(config.seed)
+        self._max_leverage = max(float(config.max_leverage), 1.0)
+        self._maintenance_margin_pct = max(float(config.maintenance_margin_pct), 0.0)
+        self._initial_margin_pct = max(
+            float(config.initial_margin_pct), self._maintenance_margin_pct
+        )
+        self._hard_stop_pct = (
+            float(risk_config.stops.hard_risk_percent) if risk_config else 0.02
+        )
 
         self._maker_fills = 0
         self._taker_fills = 0
+        self._maker_fills_by_symbol: Dict[str, int] = defaultdict(int)
+        self._taker_fills_by_symbol: Dict[str, int] = defaultdict(int)
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -204,6 +216,7 @@ class PaperBroker:
                             maker=maker,
                             slippage_bps=slippage_bps,
                             delay_ms=delay_ms,
+                            reduce_only=reduce_only,
                         )
                     )
             else:
@@ -491,6 +504,7 @@ class PaperBroker:
         maker: bool,
         slippage_bps: float,
         delay_ms: float,
+        reduce_only: bool,
     ) -> None:
         await asyncio.sleep(delay_ms / 1000.0)
 
@@ -500,111 +514,163 @@ class PaperBroker:
         execution_report: Optional[Dict[str, Any]] = None
 
         async with self._lock:
-            position_state = self._positions.setdefault(
-                order.symbol, _PositionState(symbol=order.symbol)
-            )
+            try:
+                position_state = self._positions.setdefault(
+                    order.symbol, _PositionState(symbol=order.symbol)
+                )
 
-            realized_pnl, updated_size, updated_price = self._apply_position_fill(
-                position_state, cast(Side, order.side), fill_qty, fill_price
-            )
-            position_state.size = updated_size
-            position_state.avg_price = updated_price
+                realized_pnl, updated_size, updated_price = self._apply_position_fill(
+                    position_state, cast(Side, order.side), fill_qty, fill_price
+                )
+                position_state.size = updated_size
+                position_state.avg_price = updated_price
 
-            mark_price = snapshot.mid_price
-            position_state.update_mark(mark_price)
+                mark_price = snapshot.mid_price
+                position_state.update_mark(mark_price)
+                if not reduce_only:
+                    self._enforce_liquidation_buffer(
+                        position_state,
+                        stop_price=order.stop_price,
+                        side=cast(Side, order.side),
+                    )
 
-            funding = self._compute_funding(fill_price, fill_qty, snapshot)
-            net_cash = realized_pnl - fee_amount - funding
-            self._balance += net_cash
+                funding = self._compute_funding(fill_price, fill_qty, snapshot)
+                net_cash = realized_pnl - fee_amount - funding
+                self._balance += net_cash
 
-            trade = Trade(
-                client_id=f"{order.client_id}-{uuid.uuid4().hex[:6]}",
-                trade_id=f"{order.order_id}-{uuid.uuid4().hex[:6]}",
-                order_id=order.order_id or order.client_id,
-                symbol=order.symbol,
-                side=order.side,
-                quantity=fill_qty,
-                price=fill_price,
-                commission=0.0,
-                fees=fee_amount,
-                funding=funding,
-                realized_pnl=realized_pnl,
-                mark_price=mark_price,
-                slippage_bps=slippage_bps,
-                latency_ms=delay_ms,
-                maker=maker,
-                mode=self.mode,
-                run_id=self.run_id,
-                timestamp=datetime.utcnow(),
-                is_shadow=order.is_shadow,
-            )
-            await self.database.create_trade(trade)
-
-            await self.database.add_pnl_entry(
-                PnLEntry(
+                trade = Trade(
+                    client_id=f"{order.client_id}-{uuid.uuid4().hex[:6]}",
+                    trade_id=f"{order.order_id}-{uuid.uuid4().hex[:6]}",
+                    order_id=order.order_id or order.client_id,
                     symbol=order.symbol,
-                    trade_id=trade.trade_id,
-                    realized_pnl=realized_pnl,
-                    unrealized_pnl=position_state.unrealized_pnl,
-                    commission=trade.commission,
+                    side=order.side,
+                    quantity=fill_qty,
+                    price=fill_price,
+                    commission=0.0,
                     fees=fee_amount,
                     funding=funding,
-                    net_pnl=net_cash,
-                    balance=self._balance,
+                    realized_pnl=realized_pnl,
+                    mark_price=mark_price,
+                    slippage_bps=slippage_bps,
+                    latency_ms=delay_ms,
+                    maker=maker,
                     mode=self.mode,
                     run_id=self.run_id,
-                    timestamp=trade.timestamp,
+                    timestamp=datetime.utcnow(),
+                    is_shadow=order.is_shadow,
                 )
-            )
+                await self.database.create_trade(trade)
 
-            remaining = max(
-                self._order_progress.get(order.client_id, 0.0) - fill_qty, 0.0
-            )
-            self._order_progress[order.client_id] = remaining
-            status = "filled" if remaining <= 1e-8 else "partially_filled"
-            await self.database.update_order_status(
-                order_id=order.order_id or order.client_id,
-                status=status,
-                is_shadow=order.is_shadow,
-            )
-            if status == "filled":
+                await self.database.add_pnl_entry(
+                    PnLEntry(
+                        symbol=order.symbol,
+                        trade_id=trade.trade_id,
+                        realized_pnl=realized_pnl,
+                        unrealized_pnl=position_state.unrealized_pnl,
+                        commission=trade.commission,
+                        fees=fee_amount,
+                        funding=funding,
+                        net_pnl=net_cash,
+                        balance=self._balance,
+                        mode=self.mode,
+                        run_id=self.run_id,
+                        timestamp=trade.timestamp,
+                    )
+                )
+
+                remaining = max(
+                    self._order_progress.get(order.client_id, 0.0) - fill_qty, 0.0
+                )
+                self._order_progress[order.client_id] = remaining
+                status = "filled" if remaining <= 1e-8 else "partially_filled"
+                await self.database.update_order_status(
+                    order_id=order.order_id or order.client_id,
+                    status=status,
+                    is_shadow=order.is_shadow,
+                )
+                if status == "filled":
+                    self._order_progress.pop(order.client_id, None)
+
+                SIGNAL_ACK_LATENCY.labels(mode=self.mode).observe(delay_ms / 1000.0)
+                AVERAGE_SLIPPAGE_BPS.labels(mode=self.mode, symbol=order.symbol).set(
+                    slippage_bps
+                )
+                if maker:
+                    self._maker_fills += 1
+                    self._maker_fills_by_symbol[order.symbol] += 1
+                else:
+                    self._taker_fills += 1
+                    self._taker_fills_by_symbol[order.symbol] += 1
+                total_symbol_fills = (
+                    self._maker_fills_by_symbol[order.symbol]
+                    + self._taker_fills_by_symbol[order.symbol]
+                )
+                if total_symbol_fills > 0:
+                    MAKER_RATIO.labels(mode=self.mode, symbol=order.symbol).set(
+                        self._maker_fills_by_symbol[order.symbol] / total_symbol_fills
+                    )
+
+                execution_report = {
+                    "order_id": order.order_id or order.client_id,
+                    "client_id": order.client_id,
+                    "symbol": order.symbol,
+                    "executed": True,
+                    "price": fill_price,
+                    "mark_price": mark_price,
+                    "quantity": fill_qty,
+                    "fees": fee_amount,
+                    "funding": funding,
+                    "realized_pnl": realized_pnl,
+                    "slippage_bps": slippage_bps,
+                    "maker": maker,
+                    "latency_ms": delay_ms,
+                    "ack_latency_ms": delay_ms,
+                    "mode": self.mode,
+                    "run_id": self.run_id,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "is_shadow": order.is_shadow,
+                    "error": "",
+                    "reduce_only": reduce_only,
+                    "order_type": order.order_type,
+                    "stop_price": order.stop_price,
+                    "initial_price": order.price,
+                }
+            except RuntimeError as exc:
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    "Order %s rejected by liquidation guard: %s", order.client_id, exc
+                )
                 self._order_progress.pop(order.client_id, None)
-
-            SIGNAL_ACK_LATENCY.observe(delay_ms / 1000.0)
-            AVERAGE_SLIPPAGE_BPS.set(slippage_bps)
-            if maker:
-                self._maker_fills += 1
-            else:
-                self._taker_fills += 1
-            total_fills = self._maker_fills + self._taker_fills
-            if total_fills > 0:
-                MAKER_RATIO.set(self._maker_fills / total_fills)
-
-            execution_report = {
-                "order_id": order.order_id or order.client_id,
-                "client_id": order.client_id,
-                "symbol": order.symbol,
-                "executed": True,
-                "price": fill_price,
-                "mark_price": mark_price,
-                "quantity": fill_qty,
-                "fees": fee_amount,
-                "funding": funding,
-                "realized_pnl": realized_pnl,
-                "slippage_bps": slippage_bps,
-                "maker": maker,
-                "latency_ms": delay_ms,
-                "ack_latency_ms": delay_ms,
-                "mode": self.mode,
-                "run_id": self.run_id,
-                "timestamp": datetime.utcnow().isoformat(),
-                "is_shadow": order.is_shadow,
-                "error": "",
-                "reduce_only": False,
-                "order_type": order.order_type,
-                "stop_price": order.stop_price,
-                "initial_price": order.price,
-            }
+                await self.database.update_order_status(
+                    order_id=order.order_id or order.client_id,
+                    status="rejected",
+                    is_shadow=order.is_shadow,
+                )
+                execution_report = {
+                    "order_id": order.order_id or order.client_id,
+                    "client_id": order.client_id,
+                    "symbol": order.symbol,
+                    "executed": False,
+                    "price": None,
+                    "mark_price": snapshot.mid_price,
+                    "quantity": 0.0,
+                    "fees": 0.0,
+                    "funding": 0.0,
+                    "realized_pnl": 0.0,
+                    "slippage_bps": 0.0,
+                    "maker": False,
+                    "latency_ms": delay_ms,
+                    "ack_latency_ms": delay_ms,
+                    "mode": self.mode,
+                    "run_id": self.run_id,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "is_shadow": order.is_shadow,
+                    "error": str(exc),
+                    "reduce_only": reduce_only,
+                    "order_type": order.order_type,
+                    "stop_price": order.stop_price,
+                    "initial_price": order.price,
+                }
 
         if execution_report and self._execution_listener:
             try:
@@ -643,6 +709,7 @@ class PaperBroker:
                     maker=maker,
                     slippage_bps=slippage_bps,
                     delay_ms=delay_ms,
+                    reduce_only=rest.reduce_only,
                 )
             )
 
@@ -721,3 +788,57 @@ class PaperBroker:
         # funding applied on hourly basis relative to snapshot timestamp
         hours = 1.0
         return notional * snapshot.funding_rate * hours
+
+    def _derive_stop_distance(
+        self, avg_price: float, stop_price: Optional[float], direction: int
+    ) -> float:
+        if avg_price <= 0:
+            return 0.0
+        if stop_price is not None:
+            return max(abs(avg_price - stop_price), 0.0)
+        return max(avg_price * self._hard_stop_pct, 0.0)
+
+    def _estimate_liquidation_price(self, avg_price: float, direction: int) -> float:
+        if avg_price <= 0:
+            return avg_price
+        leverage_buffer = 1.0 / self._max_leverage
+        initial = max(self._initial_margin_pct, leverage_buffer)
+        maintenance = self._maintenance_margin_pct
+        buffer = initial - maintenance
+        if buffer <= 0:
+            buffer = leverage_buffer * 0.5
+        buffer = min(buffer, 0.9)
+        if direction >= 0:
+            return avg_price * (1 - buffer)
+        return avg_price * (1 + buffer)
+
+    def _enforce_liquidation_buffer(
+        self,
+        position: _PositionState,
+        *,
+        stop_price: Optional[float],
+        side: Side,
+    ) -> None:
+        if position.size == 0 or position.avg_price <= 0:
+            return
+        direction = 1 if position.size > 0 else -1
+        stop_distance = self._derive_stop_distance(
+            position.avg_price, stop_price, direction
+        )
+        if stop_distance <= 0:
+            return
+        liq_price = self._estimate_liquidation_price(position.avg_price, direction)
+        liq_distance = abs(position.avg_price - liq_price)
+        if liq_distance < stop_distance * 4:
+            raise RuntimeError(
+                (
+                    "Liquidation buffer breached: liq_distance=%.4f stop_distance=%.4f "
+                    "required=%.4f direction=%s"
+                )
+                % (
+                    liq_distance,
+                    stop_distance,
+                    stop_distance * 4,
+                    side,
+                )
+            )

@@ -8,7 +8,7 @@ This document describes the production-grade paper trading pipeline and how to c
 - **Market/Stop orders** – marketables cross the spread immediately with configurable slippage; stop-orders trigger on composite mid-price and execute reduce-only market orders.
 - **Latency distribution** – acknowledgements and fills are delayed according to `latency_ms.{mean,p95,jitter}` using a Gaussian sampler with clamping at zero.
 - **Fees & funding** – maker rebates / taker fees apply per fill, and hourly/8h funding accrues when `funding_enabled` is set.
-- **Risk & liquidation guardrails** - position sizing, margin, and liquidation distance are tracked so paper accounts respect risk policy (liquidation >= 4x configured stop distance).
+- **Risk & liquidation guardrails** - position sizing, configurable margin rules, and liquidation distance are tracked via `paper.max_leverage`, `paper.initial_margin_pct`, and `paper.maintenance_margin_pct`. Orders that would breach the 4x stop-distance buffer are rejected.
 - **Persistence & observability** - every fill records achieved price, mark-to-market, slippage bps, maker/taker flag, latency_ms, and is tagged with `{mode, run_id}`. Metrics for slippage, maker ratio, and signal->ack latency are exported via Prometheus.
 
 ## Limitations vs Live
@@ -35,4 +35,4 @@ This document describes the production-grade paper trading pipeline and how to c
 
 3. **Iterate**
 
-   Adjust `slippage_bps`, `spread_slippage_coeff`, `ofi_slippage_coeff`, `latency_ms`, and partial-fill settings until live vs. shadow deviations stay within tolerance. Re-run calibration workflows after any exchange microstructure change.
+   Adjust `slippage_bps`, `spread_slippage_coeff`, `ofi_slippage_coeff`, `latency_ms`, partial-fill settings, and the margin trio (`paper.max_leverage`, `paper.initial_margin_pct`, `paper.maintenance_margin_pct`) until live vs. shadow deviations stay within tolerance. Re-run calibration workflows after any exchange microstructure change.

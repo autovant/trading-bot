@@ -4,6 +4,7 @@
   "tests/test_database_rollup.py::test_aggregate_daily_pnl_rollup",
   "tests/test_paper_broker.py::test_latency_sampler_properties",
   "tests/test_paper_broker.py::test_limit_order_partial_fill",
+  "tests/test_paper_broker.py::test_liquidation_guard_rejects_insufficient_buffer",
   "tests/test_paper_broker.py::test_market_order_slippage_and_fees",
   "tests/test_paper_broker.py::test_slippage_boundaries",
   "tests/test_paper_broker.py::test_stop_order_triggers_on_mid_cross",

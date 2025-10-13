@@ -195,3 +195,30 @@ def test_latency_sampler_properties():
     index = int(0.95 * (len(samples) - 1))
     p95 = float(samples[index])
     assert pytest.approx(p95, rel=0.2) == cfg.latency_ms.p95
+
+
+@pytest.mark.asyncio
+async def test_liquidation_guard_rejects_insufficient_buffer():
+    db = StubDatabase()
+    cfg = basic_config(
+        initial_margin_pct=0.02,
+        maintenance_margin_pct=0.005,
+        max_leverage=50,
+    )
+    broker = PaperBroker(
+        config=cfg, database=db, mode="paper", run_id="guard", initial_balance=10_000
+    )
+    await broker.update_market(make_snapshot(100))
+    await broker.place_order(
+        symbol="BTCUSDT",
+        side="buy",
+        order_type="market",
+        quantity=1.0,
+        client_id="guarded-order",
+    )
+    await asyncio.sleep(0.05)
+
+    statuses = db.orders.get("guarded-order", [])
+    assert statuses, "order status not recorded"
+    assert statuses[-1] == "rejected"
+    assert not any(trade.order_id == "guarded-order" for trade in db.trades)

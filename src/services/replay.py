@@ -233,9 +233,9 @@ class ReplayService(BaseService):
             "state": self.state,
             "interval": self._interval,
             "dataset_size": self.dataset_size,
-            "speed": getattr(self.config.replay, "speed", None)
-            if self.config
-            else None,
+            "speed": (
+                getattr(self.config.replay, "speed", None) if self.config else None
+            ),
             "last_control": self._last_control,
             "last_control_at": self.last_control_at,
         }

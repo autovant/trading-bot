@@ -22,6 +22,7 @@ from prometheus_client import Counter, Histogram
 from ..config import TradingBotConfig, load_config
 from ..database import DatabaseManager
 from ..messaging import MessagingClient
+from ..metrics import REJECT_RATE
 from ..paper_trader import MarketSnapshot, PaperBroker
 from .base import BaseService, create_app
 
@@ -50,6 +51,8 @@ class ExecutionService(BaseService):
         self.messaging: Optional[MessagingClient] = None
         self.broker: Optional[PaperBroker] = None
         self._subscriptions: List[Subscription] = []
+        self._order_attempts = 0
+        self._order_rejections = 0
 
     async def on_startup(self) -> None:
         self.config = load_config()
@@ -67,6 +70,7 @@ class ExecutionService(BaseService):
             mode=self.config.app_mode,
             run_id=f"exec-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
             initial_balance=self.config.trading.initial_capital,
+            risk_config=self.config.risk_management,
             execution_listener=self._publish_execution_report,
         )
 
@@ -99,6 +103,15 @@ class ExecutionService(BaseService):
         self.database = None
         self.broker = None
 
+    def _update_reject_rate(self) -> None:
+        if not self.config:
+            return
+        if self._order_attempts == 0:
+            rate = 0.0
+        else:
+            rate = self._order_rejections / self._order_attempts
+        REJECT_RATE.labels(mode=self.config.app_mode).set(rate)
+
     async def _publish_execution_report(self, report: Dict[str, Any]) -> None:
         """Publish a simulated fill report."""
         if not self.messaging or not self.config:
@@ -127,8 +140,13 @@ class ExecutionService(BaseService):
             payload = json.loads(msg.data.decode("utf-8"))
         except json.JSONDecodeError:
             logger.error("Received invalid order payload: %s", msg.data)
+            self._order_attempts += 1
+            self._order_rejections += 1
             ORDER_ACCEPTED.labels(status="invalid").inc()
+            self._update_reject_rate()
             return
+
+        self._order_attempts += 1
 
         try:
             order = await self.broker.place_order(
@@ -144,6 +162,7 @@ class ExecutionService(BaseService):
             )
 
             ORDER_ACCEPTED.labels(status="accepted").inc()
+            self._update_reject_rate()
 
             acknowledgement = {
                 "order_id": order.order_id or order.client_id,
@@ -164,7 +183,9 @@ class ExecutionService(BaseService):
                 self.config.messaging.subjects["executions"], acknowledgement
             )
         except Exception as exc:
+            self._order_rejections += 1
             ORDER_ACCEPTED.labels(status="rejected").inc()
+            self._update_reject_rate()
             logger.exception("Failed to process order: %s", exc)
             await self.messaging.publish(
                 self.config.messaging.subjects["executions"],

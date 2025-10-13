@@ -83,6 +83,7 @@ class TradingEngine:
                     mode=cast(Mode, self.config.app_mode),
                     run_id=self.run_id,
                     initial_balance=self.config.trading.initial_capital,
+                    risk_config=self.config.risk_management,
                 )
             else:
                 self.paper_broker = None
@@ -96,6 +97,7 @@ class TradingEngine:
                     mode="paper",
                     run_id=f"shadow-{self.run_id}",
                     initial_balance=self.config.trading.initial_capital,
+                    risk_config=self.config.risk_management,
                 )
             else:
                 self.shadow_broker = None

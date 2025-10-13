@@ -18,6 +18,7 @@ from fastapi import FastAPI
 
 from ..config import TradingBotConfig, load_config
 from ..database import DatabaseManager
+from ..metrics import CIRCUIT_BREAKERS
 from ..messaging import MessagingClient
 from .base import BaseService, create_app
 
@@ -78,11 +79,13 @@ class RiskService(BaseService):
             volatility = random.random()
             position_factor = 1 - random.random() * 0.3
 
+            previous_crisis = crisis
             if random.random() < 0.05:
                 crisis = not crisis
                 if crisis:
                     consecutive_losses += 1
-
+            if crisis and not previous_crisis and self.config:
+                CIRCUIT_BREAKERS.labels(mode=self.config.app_mode).inc()
             payload = {
                 "crisis_mode": crisis,
                 "consecutive_losses": consecutive_losses,
