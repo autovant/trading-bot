@@ -29,13 +29,22 @@ services:
       dockerfile: Dockerfile
     container_name: strategy-engine
     restart: unless-stopped
+    command:
+      [
+        "python",
+        "-m",
+        "src.main",
+      ]
     environment:
       APP_MODE: ${APP_MODE:-paper}
       PYTHONPATH: /app
       EXCHANGE_API_KEY: ${EXCHANGE_API_KEY}
       EXCHANGE_SECRET_KEY: ${EXCHANGE_SECRET_KEY}
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
-      - ./src:/app/src
+      - ./src:/app/src:ro
       - ./config:/app/config:ro
       - ./data:/app/data
       - ./logs:/app/logs
@@ -68,8 +77,11 @@ services:
       - postgres
     ports:
       - "8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
-      - ./src:/app/src
+      - ./src:/app/src:ro
       - ./config:/app/config:ro
       - ./data:/app/data
 
@@ -97,8 +109,11 @@ services:
       - nats
     ports:
       - "8081:8081"
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
-      - ./src:/app/src
+      - ./src:/app/src:ro
       - ./config:/app/config:ro
 
   ops-api:
@@ -126,6 +141,9 @@ services:
     depends_on:
       - nats
       - postgres
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
       - ./config:/app/config
       - ./data:/app/data
@@ -141,9 +159,14 @@ services:
       PYTHONPATH: /app
     ports:
       - "8501:8501"
+    read_only: true
+    tmpfs:
+      - /tmp
     command: ["streamlit", "run", "dashboard/app.py"]
     depends_on:
       - strategy-engine
+    volumes:
+      - ./dashboard:/app/dashboard:ro
 
   reporter:
     build:
@@ -169,8 +192,11 @@ services:
       - nats
     ports:
       - "8083:8083"
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
-      - ./src:/app/src
+      - ./src:/app/src:ro
       - ./config:/app/config:ro
       - ./data:/app/data
 
@@ -198,8 +224,11 @@ services:
       - nats
     ports:
       - "8084:8084"
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
-      - ./src:/app/src
+      - ./src:/app/src:ro
       - ./config:/app/config:ro
 
   replay-service:
@@ -224,9 +253,12 @@ services:
       ]
     depends_on:
       - nats
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
       - ./sample_data:/app/sample_data:ro
-      - ./src:/app/src
+      - ./src:/app/src:ro
       - ./config:/app/config:ro
     ports:
       - "8085:8085"

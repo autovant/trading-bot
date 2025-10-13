@@ -23,3 +23,6 @@ scrape_configs:
   - job_name: 'risk-state'
     static_configs:
       - targets: ['risk-state:8084']
+  - job_name: 'replay'
+    static_configs:
+      - targets: ['replay-service:8085']
