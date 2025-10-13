@@ -7,11 +7,13 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 import os
+from typing import List, Optional
 import requests
 
 from src.config import get_config
 
 OPS_API_URL = os.getenv("OPS_API_URL", "http://ops-api:8082")
+REPLAY_URL = os.getenv("REPLAY_URL", "http://replay-service:8085")
 
 
 def fetch_mode():
@@ -48,6 +50,40 @@ def update_paper_config(payload: dict) -> bool:
         return resp.ok
     except requests.RequestException:
         return False
+
+
+def fetch_replay_status() -> Optional[dict]:
+    try:
+        resp = requests.get(f"{REPLAY_URL}/status", timeout=2)
+        if resp.ok:
+            return resp.json()
+    except requests.RequestException:
+        return None
+    return None
+
+
+def control_replay(action: str) -> bool:
+    try:
+        resp = requests.post(
+            f"{REPLAY_URL}/control", json={"action": action}, timeout=2
+        )
+        return resp.ok
+    except requests.RequestException:
+        return False
+
+
+def fetch_risk_snapshots(limit: int = 40) -> List[dict]:
+    try:
+        resp = requests.get(
+            f"{OPS_API_URL}/api/risk/snapshots",
+            params={"limit": limit},
+            timeout=2,
+        )
+        if resp.ok:
+            return resp.json()
+    except requests.RequestException:
+        return []
+    return []
 
 
 # Page configuration
@@ -177,6 +213,8 @@ def main():
     paper_config = fetch_paper_config() or paper_defaults
 
     trades_df, positions_df, pnl_df, performance_df = load_data()
+    replay_status = fetch_replay_status() or {}
+    risk_snapshots = fetch_risk_snapshots()
 
     st.title("🚀 Crypto Trading Bot Dashboard")
     badge_color = {
@@ -190,6 +228,80 @@ def main():
     )
     if shadow_enabled:
         st.caption("Shadow paper trading enabled")
+    st.markdown("---")
+
+    status_col, risk_col = st.columns([1, 1])
+
+    with status_col:
+        st.subheader("Replay Service")
+        replay_state = replay_status.get("state", "unknown")
+        st.metric("State", replay_state.title())
+        dataset_size = replay_status.get("dataset_size")
+        interval = replay_status.get("interval")
+        if dataset_size is not None and interval is not None:
+            st.caption(f"{dataset_size} snapshots | interval {interval:.2f}s")
+        last_action = replay_status.get("last_control")
+        last_action_at = replay_status.get("last_control_at")
+        if last_action_at:
+            try:
+                ts = pd.to_datetime(last_action_at)
+                st.caption(f"Last action: {last_action or 'n/a'} @ {ts:%Y-%m-%d %H:%M:%S}")
+            except Exception:
+                st.caption(f"Last action: {last_action or 'n/a'}")
+
+        replay_controls = st.columns(2)
+        with replay_controls[0]:
+            if st.button(
+                "Pause Replay",
+                key="pause_replay",
+                disabled=replay_state == "paused",
+            ):
+                if control_replay("pause"):
+                    st.success("Replay paused")
+                    st.experimental_rerun()
+                else:
+                    st.error("Failed to pause replay")
+        with replay_controls[1]:
+            if st.button(
+                "Resume Replay",
+                key="resume_replay",
+                disabled=replay_state == "running",
+            ):
+                if control_replay("resume"):
+                    st.success("Replay resumed")
+                    st.experimental_rerun()
+                else:
+                    st.error("Failed to resume replay")
+
+    with risk_col:
+        st.subheader("Risk Stream")
+        if risk_snapshots:
+            risk_df = pd.DataFrame(risk_snapshots)
+            if "created_at" in risk_df.columns:
+                risk_df["created_at"] = pd.to_datetime(risk_df["created_at"])
+                risk_df.sort_values("created_at", inplace=True)
+            latest = risk_df.iloc[-1]
+            st.metric(
+                "Crisis Mode",
+                "Active" if bool(latest["crisis_mode"]) else "Normal",
+            )
+            drawdown_pct = float(latest.get("drawdown", 0.0)) * 100
+            volatility_pct = float(latest.get("volatility", 0.0)) * 100
+            st.metric("Drawdown", f"{drawdown_pct:.1f}%")
+            st.metric("Volatility", f"{volatility_pct:.1f}%")
+            trend_df = risk_df.tail(60)
+            fig_risk = px.line(
+                trend_df,
+                x="created_at" if "created_at" in trend_df.columns else trend_df.index,
+                y="drawdown",
+                title="Drawdown (recent snapshots)",
+                labels={"created_at": "Timestamp", "drawdown": "Drawdown"},
+            )
+            fig_risk.update_layout(height=260, showlegend=False)
+            st.plotly_chart(fig_risk, use_container_width=True)
+        else:
+            st.info("Risk stream snapshots not available yet.")
+
     st.markdown("---")
 
     has_positions = not positions_df.empty and current_mode != "paper"

@@ -10,10 +10,10 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import Body, FastAPI, HTTPException
 from nats.aio.msg import Msg
 from nats.aio.subscription import Subscription
 
@@ -34,6 +34,8 @@ class ReplayService(BaseService):
         self._running = asyncio.Event()
         self._dataset: List[Dict[str, float | str]] = []
         self._interval = 0.5
+        self._last_control: Optional[str] = None
+        self._last_control_at: Optional[datetime] = None
 
     async def on_startup(self) -> None:
         self.config = load_config()
@@ -92,10 +94,8 @@ class ReplayService(BaseService):
         except Exception:
             return
 
-        if payload == "pause":
-            self._running.clear()
-        elif payload == "resume":
-            self._running.set()
+        if payload in {"pause", "resume"}:
+            await self.set_state(payload)
 
     def _derive_interval(self) -> float:
         assert self.config is not None
@@ -195,6 +195,65 @@ class ReplayService(BaseService):
             "order_flow_imbalance": ofi,
         }
 
+    @property
+    def state(self) -> str:
+        return "running" if self._running.is_set() else "paused"
+
+    @property
+    def interval(self) -> float:
+        return self._interval
+
+    @property
+    def dataset_size(self) -> int:
+        return len(self._dataset)
+
+    @property
+    def last_control(self) -> Optional[str]:
+        return self._last_control
+
+    @property
+    def last_control_at(self) -> Optional[str]:
+        if self._last_control_at is None:
+            return None
+        return self._last_control_at.isoformat()
+
+    async def set_state(self, action: str) -> None:
+        normalized = action.lower()
+        if normalized == "pause":
+            self._running.clear()
+        elif normalized == "resume":
+            self._running.set()
+        else:
+            raise ValueError(f"Unsupported replay control action: {action}")
+        self._last_control = normalized
+        self._last_control_at = datetime.now(timezone.utc)
+
+    def status_payload(self) -> Dict[str, Any]:
+        return {
+            "state": self.state,
+            "interval": self._interval,
+            "dataset_size": self.dataset_size,
+            "speed": getattr(self.config.replay, "speed", None)
+            if self.config
+            else None,
+            "last_control": self._last_control,
+            "last_control_at": self.last_control_at,
+        }
+
 
 service = ReplayService()
 app: FastAPI = create_app(service)
+
+
+@app.get("/status")
+async def replay_status() -> Dict[str, Any]:
+    return service.status_payload()
+
+
+@app.post("/control")
+async def replay_control(action: str = Body(..., embed=True)) -> Dict[str, Any]:
+    try:
+        await service.set_state(action)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return service.status_payload()

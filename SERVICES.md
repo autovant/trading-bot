@@ -20,6 +20,7 @@ The trading bot uses a microservices architecture with NATS messaging for commun
 - **Language**: Python (FastAPI)
 - **Purpose**: Monitors and manages risk state (crisis mode, drawdown, etc.)
 - **Communication**: Subscribes to risk management topics, publishes risk state
+- **Persistence**: Writes snapshots to SQLite `risk_snapshots` for Ops API and dashboard use
 - **Docker**: `risk-state` service (`uvicorn src.services.risk:app`)
 
 ### 4. Reporter Service
@@ -33,6 +34,13 @@ The trading bot uses a microservices architecture with NATS messaging for commun
 - **Purpose**: Provides operational APIs for monitoring, mode switching, and config management
 - **Communication**: HTTP REST API + NATS notifications
 - **Docker**: `ops-api` service (`uvicorn src.ops_api_service:app`)
+
+### 6. Replay Service
+- **Language**: Python (FastAPI)
+- **Purpose**: Streams historical data over NATS for deterministic paper trading and exposes HTTP controls
+- **Communication**: Publishes market data to NATS, listens for replay.control commands
+- **HTTP**: `/status` for live state and `/control` (`pause`/`resume`) for dashboards
+- **Docker**: `replay-service` (`uvicorn src.services.replay:app`)
 
 ## NATS Messaging
 

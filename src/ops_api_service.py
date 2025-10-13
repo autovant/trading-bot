@@ -109,6 +109,18 @@ class TradeResponse(BaseModel):
     is_shadow: bool = False
 
 
+class RiskSnapshotResponse(BaseModel):
+    crisis_mode: bool
+    consecutive_losses: int
+    drawdown: float
+    volatility: float
+    position_size_factor: float
+    mode: APP_MODE
+    run_id: str
+    created_at: Optional[str] = None
+    payload: Dict[str, Any]
+
+
 class ConfigVersionResponse(BaseModel):
     version: str
     created_at: Optional[str] = None
@@ -462,6 +474,28 @@ async def list_config_versions(
             created_at=_isoformat_or_none(item.created_at),
         )
         for item in versions
+    ]
+
+
+@app.get("/api/risk/snapshots", response_model=List[RiskSnapshotResponse])
+async def get_risk_snapshots(
+    limit: int = Query(default=20, ge=1, le=200),
+) -> List[RiskSnapshotResponse]:
+    database = await _ensure_database()
+    snapshots = await database.get_risk_snapshots(limit=limit)
+    return [
+        RiskSnapshotResponse(
+            crisis_mode=item.crisis_mode,
+            consecutive_losses=item.consecutive_losses,
+            drawdown=item.drawdown,
+            volatility=item.volatility,
+            position_size_factor=item.position_size_factor,
+            mode=item.mode,
+            run_id=item.run_id,
+            created_at=_isoformat_or_none(item.created_at),
+            payload=item.payload,
+        )
+        for item in snapshots
     ]
 
 

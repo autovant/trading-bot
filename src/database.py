@@ -6,6 +6,7 @@ and ``run_id`` for full auditability.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from datetime import datetime
@@ -112,6 +113,19 @@ class PnLEntry(DBModel):
     mode: Mode = "paper"
     run_id: str = "default"
     timestamp: Optional[datetime] = None
+
+
+class RiskSnapshot(DBModel):
+    id: Optional[int] = None
+    mode: Mode
+    run_id: str
+    crisis_mode: bool
+    consecutive_losses: int
+    drawdown: float
+    volatility: float
+    position_size_factor: float
+    payload: Dict[str, Any]
+    created_at: Optional[datetime] = None
 
 
 class ConfigVersion(DBModel):
@@ -309,6 +323,23 @@ class DatabaseManager:
 
         cursor.execute(
             """
+            CREATE TABLE IF NOT EXISTS risk_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mode TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                crisis_mode INTEGER NOT NULL,
+                consecutive_losses INTEGER NOT NULL,
+                drawdown REAL NOT NULL,
+                volatility REAL NOT NULL,
+                position_size_factor REAL NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """
+        )
+
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS strategy_performance (
                 mode TEXT PRIMARY KEY,
                 run_id TEXT,
@@ -352,6 +383,8 @@ class DatabaseManager:
             ("positions", "symbol"),
             ("pnl_ledger", "mode"),
             ("pnl_ledger", "timestamp"),
+            ("risk_snapshots", "mode"),
+            ("risk_snapshots", "created_at"),
         ]:
             cursor.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_{table}_{column} ON {table} ({column})"
@@ -848,6 +881,82 @@ class DatabaseManager:
             ]
         except Exception as exc:
             logger.error("Error retrieving PnL history: %s", exc)
+            return []
+
+    # --------------------------------------------------------------------- #
+    # Risk snapshots
+    # --------------------------------------------------------------------- #
+
+    async def record_risk_snapshot(
+        self, snapshot: Dict[str, Any], *, mode: Mode, run_id: str
+    ) -> bool:
+        if not self.connection:
+            return False
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """
+                INSERT INTO risk_snapshots
+                (mode, run_id, crisis_mode, consecutive_losses, drawdown, volatility,
+                 position_size_factor, payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    mode,
+                    run_id,
+                    _bool_to_int(bool(snapshot.get("crisis_mode", False))),
+                    int(snapshot.get("consecutive_losses", 0)),
+                    float(snapshot.get("drawdown", 0.0)),
+                    float(snapshot.get("volatility", 0.0)),
+                    float(snapshot.get("position_size_factor", 0.0)),
+                    json.dumps(snapshot),
+                ),
+            )
+            self.connection.commit()
+            return True
+        except Exception as exc:
+            logger.error("Error recording risk snapshot: %s", exc)
+            return False
+
+    async def get_risk_snapshots(self, limit: int = 50) -> List[RiskSnapshot]:
+        if not self.connection:
+            return []
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """
+                SELECT id, mode, run_id, crisis_mode, consecutive_losses, drawdown,
+                       volatility, position_size_factor, payload, created_at
+                FROM risk_snapshots
+                ORDER BY created_at DESC
+                LIMIT ?
+            """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            snapshots: List[RiskSnapshot] = []
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload"])
+                except (TypeError, json.JSONDecodeError):
+                    payload = {}
+                snapshots.append(
+                    RiskSnapshot(
+                        id=row["id"],
+                        mode=row["mode"],
+                        run_id=row["run_id"],
+                        crisis_mode=bool(row["crisis_mode"]),
+                        consecutive_losses=row["consecutive_losses"],
+                        drawdown=row["drawdown"],
+                        volatility=row["volatility"],
+                        position_size_factor=row["position_size_factor"],
+                        payload=payload,
+                        created_at=_row_datetime(row["created_at"]),
+                    )
+                )
+            return snapshots
+        except Exception as exc:
+            logger.error("Error retrieving risk snapshots: %s", exc)
             return []
 
     # --------------------------------------------------------------------- #

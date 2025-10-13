@@ -7,14 +7,12 @@
 - Refreshed documentation (README, `docs/PAPER_MODE.md`, `CHANGELOG.md`) to highlight the FastAPI architecture and published service URLs.
 - Extended `PaperBroker` with an execution-listener callback so fills are emitted back onto NATS by the execution service.
 - Rebuilt the Ops API with config staging/apply endpoints plus positions/trades snapshots backed by SQLite `config_versions` for auditability.
+- Hardened the NATS messaging client with exponential backoff, auto-resubscribe, and graceful shutdown so FastAPI services survive transient broker outages.
+- Persisted risk snapshots, exposed them via the Ops API, and updated the Streamlit dashboard with replay pause/resume controls plus live risk metrics.
 
 ## Pending / Next Steps
 1. **Runtime validation**
    - Run `docker compose up --build` to confirm the FastAPI services discover NATS and stream market data/replay flows end-to-end.
-2. **Messaging resilience**
-   - Add retry/backoff handling in `MessagingClient` and service startups for transient NATS outages (currently assumes immediate connectivity).
-3. **Dashboard polish**
-   - Surface replay pause/resume state plus risk-stream statistics inside the Streamlit dashboard to mirror new service controls.
 
 ## Known Issues / Notes
 - Local environment still lacks Docker/NATS, so the new service wiring has not been smoke-tested here; rely on CI or a dev host.
