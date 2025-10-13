@@ -10,12 +10,13 @@ fees, funding accrual, and queue dynamics.  All events are persisted through
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import random
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Literal, Optional, Tuple, cast
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, cast
 
 from .config import PaperConfig
 from .database import DatabaseManager, Order, PnLEntry, Position, Trade
@@ -106,12 +107,16 @@ class PaperBroker:
         mode: Mode,
         run_id: str,
         initial_balance: float,
+        execution_listener: Optional[
+            Callable[[Dict[str, Any]], Awaitable[None]]
+        ] = None,
     ):
         self.config = config
         self.database = database
         self.mode = mode
         self.run_id = run_id
         self._balance = initial_balance
+        self._execution_listener = execution_listener
 
         self._lock = asyncio.Lock()
         self._market_state: Dict[str, MarketSnapshot] = {}
@@ -492,6 +497,8 @@ class PaperBroker:
         fee_rate_bps = self.config.maker_rebate_bps if maker else self.config.fee_bps
         fee_amount = fill_price * fill_qty * fee_rate_bps / 10_000
 
+        execution_report: Optional[Dict[str, Any]] = None
+
         async with self._lock:
             position_state = self._positions.setdefault(
                 order.symbol, _PositionState(symbol=order.symbol)
@@ -572,6 +579,39 @@ class PaperBroker:
             total_fills = self._maker_fills + self._taker_fills
             if total_fills > 0:
                 MAKER_RATIO.set(self._maker_fills / total_fills)
+
+            execution_report = {
+                "order_id": order.order_id or order.client_id,
+                "client_id": order.client_id,
+                "symbol": order.symbol,
+                "executed": True,
+                "price": fill_price,
+                "mark_price": mark_price,
+                "quantity": fill_qty,
+                "fees": fee_amount,
+                "funding": funding,
+                "realized_pnl": realized_pnl,
+                "slippage_bps": slippage_bps,
+                "maker": maker,
+                "latency_ms": delay_ms,
+                "ack_latency_ms": delay_ms,
+                "mode": self.mode,
+                "run_id": self.run_id,
+                "timestamp": datetime.utcnow().isoformat(),
+                "is_shadow": order.is_shadow,
+                "error": "",
+                "reduce_only": False,
+                "order_type": order.order_type,
+                "stop_price": order.stop_price,
+                "initial_price": order.price,
+            }
+
+        if execution_report and self._execution_listener:
+            try:
+                await self._execution_listener(execution_report)
+            except Exception:
+                logger = logging.getLogger(__name__)
+                logger.exception("Execution listener failed")
 
     async def _execute_stop(self, stop: _StopOrder, snapshot: MarketSnapshot) -> None:
         market_order = stop.order

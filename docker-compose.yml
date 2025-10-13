@@ -46,40 +46,89 @@ services:
   execution:
     build:
       context: .
-      dockerfile: Dockerfile.services
+      dockerfile: Dockerfile
     container_name: execution
     restart: unless-stopped
     environment:
       APP_MODE: ${APP_MODE:-paper}
-    command: ["/execution_service"]
+      PYTHONPATH: /app
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "src.services.execution:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8080",
+      ]
     depends_on:
       - nats
+      - postgres
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config:ro
+      - ./data:/app/data
 
   feature-engine:
     build:
       context: .
-      dockerfile: Dockerfile.services
+      dockerfile: Dockerfile
     container_name: feature-engine
     restart: unless-stopped
     environment:
       APP_MODE: ${APP_MODE:-paper}
-    command: ["/feed_handler"]
+      PYTHONPATH: /app
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "src.services.feed:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8081",
+      ]
     depends_on:
       - nats
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config:ro
 
   ops-api:
     build:
       context: .
-      dockerfile: Dockerfile.services
+      dockerfile: Dockerfile
     container_name: ops-api
     restart: unless-stopped
     environment:
       APP_MODE: ${APP_MODE:-paper}
-    command: ["/ops_api"]
+      PYTHONPATH: /app
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "src.ops_api_service:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8082",
+      ]
     ports:
       - "8082:8082"
     depends_on:
       - nats
+      - postgres
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
 
   dash:
     build:
@@ -99,40 +148,88 @@ services:
   reporter:
     build:
       context: .
-      dockerfile: Dockerfile.services
+      dockerfile: Dockerfile
     container_name: reporter
     restart: unless-stopped
     environment:
       APP_MODE: ${APP_MODE:-paper}
-    command: ["/reporter"]
+      PYTHONPATH: /app
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "src.services.reporter:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8083",
+      ]
     depends_on:
       - nats
+    ports:
+      - "8083:8083"
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config:ro
+      - ./data:/app/data
 
   risk-state:
     build:
       context: .
-      dockerfile: Dockerfile.services
+      dockerfile: Dockerfile
     container_name: risk-state
     restart: unless-stopped
     environment:
       APP_MODE: ${APP_MODE:-paper}
-    command: ["/risk_state"]
+      PYTHONPATH: /app
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "src.services.risk:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8084",
+      ]
     depends_on:
       - nats
+    ports:
+      - "8084:8084"
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config:ro
 
   replay-service:
     build:
       context: .
-      dockerfile: Dockerfile.services
+      dockerfile: Dockerfile
     container_name: replay-service
     restart: unless-stopped
     environment:
       APP_MODE: ${APP_MODE:-replay}
-    command: ["/replay_service"]
+      PYTHONPATH: /app
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "src.services.replay:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8085",
+      ]
     depends_on:
       - nats
     volumes:
       - ./sample_data:/app/sample_data:ro
+      - ./src:/app/src
+      - ./config:/app/config:ro
+    ports:
+      - "8085:8085"
 
   prometheus:
     image: prom/prometheus:v2.37.0

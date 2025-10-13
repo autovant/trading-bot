@@ -250,6 +250,8 @@ class MessagingConfig(StrictModel):
             "executions_shadow": "trading.executions.shadow",
             "risk": "risk.management",
             "performance": "performance.metrics",
+            "replay_control": "replay.control",
+            "reports": "reports.performance",
         }
     )
 

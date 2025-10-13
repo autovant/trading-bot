@@ -8,8 +8,8 @@ This document describes the production-grade paper trading pipeline and how to c
 - **Market/Stop orders** – marketables cross the spread immediately with configurable slippage; stop-orders trigger on composite mid-price and execute reduce-only market orders.
 - **Latency distribution** – acknowledgements and fills are delayed according to `latency_ms.{mean,p95,jitter}` using a Gaussian sampler with clamping at zero.
 - **Fees & funding** – maker rebates / taker fees apply per fill, and hourly/8h funding accrues when `funding_enabled` is set.
-- **Risk & liquidation guardrails** – position sizing, margin, and liquidation distance are tracked so paper accounts respect risk policy (liquidation ≥ 4× configured stop distance).
-- **Persistence & observability** – every fill records achieved price, mark-to-market, slippage bps, maker/taker flag, latency_ms, and is tagged with `{mode, run_id}`. Metrics for slippage, maker ratio, and signal→ack latency are exported via Prometheus.
+- **Risk & liquidation guardrails** - position sizing, margin, and liquidation distance are tracked so paper accounts respect risk policy (liquidation >= 4x configured stop distance).
+- **Persistence & observability** - every fill records achieved price, mark-to-market, slippage bps, maker/taker flag, latency_ms, and is tagged with `{mode, run_id}`. Metrics for slippage, maker ratio, and signal->ack latency are exported via Prometheus.
 
 ## Limitations vs Live
 

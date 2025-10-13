@@ -10,7 +10,7 @@ A production-ready cryptocurrency trading bot with advanced strategy implementat
 - **Backtesting Engine**: Historical performance analysis with realistic execution
 - **Database Persistence**: SQLite storage for trades, positions, and PnL tracking
 - **Docker Support**: Containerized deployment with docker-compose
-- **Microservices Architecture**: NATS messaging with feed handler, execution, risk state, reporter, and ops API services
+- **FastAPI Microservices**: Python-based execution, feed, risk, replay, reporter, and ops API services connected via NATS
 - **Real-time Communication**: Publish-subscribe messaging for market data and trading signals
 
 ## Quickstart
@@ -21,7 +21,14 @@ A production-ready cryptocurrency trading bot with advanced strategy implementat
    APP_MODE=paper docker compose up --build
    ```
 
-   This assembles Postgres, NATS, strategy-engine, execution, feature-engine, ops-api, dash, reporter, replay, Prometheus, and Grafana with the paper broker active (no exchange keys required).
+   This assembles Postgres, NATS, strategy-engine, execution (`uvicorn src.services.execution:app`), feature-engine (mock feed), ops-api, dash, reporter, risk-state, replay, Prometheus, and Grafana with the paper broker active (no exchange keys required).
+   Core FastAPI health endpoints:
+   - Execution: `http://localhost:8080/health`
+   - Feed: `http://localhost:8081/health`
+   - Ops API: `http://localhost:8082/health`
+   - Reporter: `http://localhost:8083/health`
+   - Risk: `http://localhost:8084/health`
+   - Replay: `http://localhost:8085/health`
 
 2. **Open the dashboard**
 
@@ -58,9 +65,9 @@ Edit `config/strategy.yaml` to customize:
 - `src/database.py` - SQLite persistence layer
 - `src/indicators.py` - Technical analysis indicators
 - `src/messaging.py` - NATS messaging system
+- `src/services/` - FastAPI microservices (execution, feed, risk, reporter, replay)
 - `dashboard/app.py` - Streamlit monitoring interface
 - `tools/backtest.py` - Historical backtesting engine
-- `*.go` - Go microservices (feed handler, execution, risk state, reporter, ops API, replay)
 
 ## License
 
