@@ -114,6 +114,21 @@ class PnLEntry(DBModel):
     timestamp: Optional[datetime] = None
 
 
+class ConfigVersion(DBModel):
+    id: Optional[int] = None
+    version: str
+    config: str
+    created_at: Optional[datetime] = None
+
+    @field_validator("version")
+    @classmethod
+    def _ensure_version(cls, value: str) -> str:
+        candidate = value.strip()
+        if not candidate:
+            raise ValueError("version must not be blank")
+        return candidate
+
+
 def _bool_to_int(value: bool) -> int:
     return 1 if value else 0
 
@@ -314,7 +329,7 @@ class DatabaseManager:
             """
             CREATE TABLE IF NOT EXISTS config_versions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                version TEXT NOT NULL,
+                version TEXT NOT NULL UNIQUE,
                 config TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -663,6 +678,91 @@ class DatabaseManager:
         except Exception as exc:
             logger.error("Error fetching positions: %s", exc)
             return []
+
+    # --------------------------------------------------------------------- #
+    # Config versions
+    # --------------------------------------------------------------------- #
+
+    async def upsert_config_version(self, version: str, config_blob: str) -> bool:
+        if not self.connection:
+            return False
+
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """
+                INSERT INTO config_versions (version, config)
+                VALUES (?, ?)
+                ON CONFLICT(version) DO UPDATE SET
+                    config = excluded.config,
+                    created_at = CURRENT_TIMESTAMP
+                """,
+                (version, config_blob),
+            )
+            self.connection.commit()
+            return True
+        except Exception as exc:
+            logger.error("Error saving config version %s: %s", version, exc)
+            return False
+
+    async def get_config_version(self, version: str) -> Optional[ConfigVersion]:
+        if not self.connection:
+            return None
+
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """
+                SELECT id, version, config, created_at
+                FROM config_versions
+                WHERE version = ?
+                """,
+                (version,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return ConfigVersion(
+                id=row["id"],
+                version=row["version"],
+                config=row["config"],
+                created_at=_row_datetime(row["created_at"]),
+            )
+        except Exception as exc:
+            logger.error("Error fetching config version %s: %s", version, exc)
+            return None
+
+    async def list_config_versions(
+        self, limit: int = 20
+    ) -> List[ConfigVersion]:
+        if not self.connection:
+            return []
+
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """
+                SELECT id, version, config, created_at
+                FROM config_versions
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            return [
+                ConfigVersion(
+                    id=row["id"],
+                    version=row["version"],
+                    config=row["config"],
+                    created_at=_row_datetime(row["created_at"]),
+                )
+                for row in rows
+            ]
+        except Exception as exc:
+            logger.error("Error listing config versions: %s", exc)
+            return []
+
 
     # --------------------------------------------------------------------- #
     # PnL Ledger

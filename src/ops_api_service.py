@@ -13,11 +13,12 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 import yaml
 from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from prometheus_client import CONTENT_TYPE_LATEST, Gauge, generate_latest
 
 from .config import (
@@ -72,6 +73,74 @@ class PnLDailyResponse(BaseModel):
     days: List[PnLDailyEntry]
 
 
+class PositionResponse(BaseModel):
+    symbol: str
+    side: str
+    size: float
+    entry_price: float
+    mark_price: float
+    unrealized_pnl: float
+    percentage: float
+    mode: APP_MODE
+    run_id: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class TradeResponse(BaseModel):
+    client_id: str
+    trade_id: str
+    order_id: str
+    symbol: str
+    side: str
+    quantity: float
+    price: float
+    commission: float
+    fees: float
+    funding: float
+    realized_pnl: float
+    mark_price: float
+    slippage_bps: float
+    latency_ms: float
+    maker: bool
+    mode: APP_MODE
+    run_id: str
+    timestamp: Optional[str] = None
+    is_shadow: bool = False
+
+
+class ConfigVersionResponse(BaseModel):
+    version: str
+    created_at: Optional[str] = None
+
+
+class ConfigResponse(BaseModel):
+    version: Optional[str]
+    config: Dict[str, Any]
+
+
+class ConfigStageRequest(BaseModel):
+    risk_per_trade: Optional[float] = Field(default=None, ge=0.001, le=0.05)
+    soft_atr_multiplier: Optional[float] = Field(default=None, ge=0.1, le=5.0)
+    spread_budget_bps: Optional[float] = Field(default=None, ge=1, le=50)
+
+    @model_validator(mode="after")
+    def _ensure_payload(self) -> "ConfigStageRequest":
+        if (
+            self.risk_per_trade is None
+            and self.soft_atr_multiplier is None
+            and self.spread_budget_bps is None
+        ):
+            raise ValueError("At least one knob must be provided.")
+        return self
+
+
+class ConfigStageResponse(BaseModel):
+    version: str
+    config: Dict[str, Any]
+    changes: Dict[str, Any]
+
+
 app = FastAPI(title="Trading Ops API", version="2.0.0")
 
 _config_lock = asyncio.Lock()
@@ -120,6 +189,12 @@ def _persist_strategy_yaml(data: Dict[str, Any]) -> None:
     path = _strategy_config_path()
     with path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(data, handle, sort_keys=False)
+
+
+def _isoformat_or_none(value: Optional[datetime]) -> Optional[str]:
+    if value is None:
+        return None
+    return value.isoformat()
 
 
 @app.on_event("startup")
@@ -299,3 +374,183 @@ async def get_pnl_daily(
     response_mode = mode or last_mode
 
     return PnLDailyResponse(mode=response_mode, days=ordered_days)
+
+
+@app.get("/api/positions", response_model=List[PositionResponse])
+async def get_positions(
+    mode: Optional[APP_MODE] = Query(default=None),
+    run_id: Optional[str] = Query(default=None, max_length=128),
+    limit: int = Query(default=50, ge=1, le=500),
+) -> List[PositionResponse]:
+    database = await _ensure_database()
+    positions = await database.get_positions(mode=mode, run_id=run_id)
+    limited = positions[:limit]
+    return [
+        PositionResponse(
+            symbol=item.symbol,
+            side=item.side,
+            size=item.size,
+            entry_price=item.entry_price,
+            mark_price=item.mark_price,
+            unrealized_pnl=item.unrealized_pnl,
+            percentage=item.percentage,
+            mode=item.mode,
+            run_id=item.run_id,
+            created_at=_isoformat_or_none(item.created_at),
+            updated_at=_isoformat_or_none(item.updated_at),
+        )
+        for item in limited
+    ]
+
+
+@app.get("/api/trades", response_model=List[TradeResponse])
+async def get_trades(
+    symbol: Optional[str] = Query(default=None, max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    shadow: bool = Query(default=False),
+) -> List[TradeResponse]:
+    database = await _ensure_database()
+    trades = await database.get_trades(
+        symbol=symbol,
+        limit=limit,
+        is_shadow=shadow,
+    )
+    return [
+        TradeResponse(
+            client_id=item.client_id,
+            trade_id=item.trade_id,
+            order_id=item.order_id,
+            symbol=item.symbol,
+            side=item.side,
+            quantity=item.quantity,
+            price=item.price,
+            commission=item.commission,
+            fees=item.fees,
+            funding=item.funding,
+            realized_pnl=item.realized_pnl,
+            mark_price=item.mark_price,
+            slippage_bps=item.slippage_bps,
+            latency_ms=item.latency_ms,
+            maker=item.maker,
+            mode=item.mode,
+            run_id=item.run_id,
+            timestamp=_isoformat_or_none(item.timestamp),
+            is_shadow=item.is_shadow,
+        )
+        for item in trades
+    ]
+
+
+@app.get("/api/config", response_model=ConfigResponse)
+async def get_config_snapshot() -> ConfigResponse:
+    database = await _ensure_database()
+    config_data = _load_strategy_yaml()
+    versions = await database.list_config_versions(limit=1)
+    version = versions[0].version if versions else None
+    return ConfigResponse(version=version, config=config_data)
+
+
+@app.get("/api/config/versions", response_model=List[ConfigVersionResponse])
+async def list_config_versions(
+    limit: int = Query(default=10, ge=1, le=50),
+) -> List[ConfigVersionResponse]:
+    database = await _ensure_database()
+    versions = await database.list_config_versions(limit=limit)
+    return [
+        ConfigVersionResponse(
+            version=item.version,
+            created_at=_isoformat_or_none(item.created_at),
+        )
+        for item in versions
+    ]
+
+
+def _apply_safe_knobs(
+    data: Dict[str, Any], payload: ConfigStageRequest
+) -> Dict[str, Any]:
+    changes: Dict[str, Any] = {}
+
+    if payload.risk_per_trade is not None:
+        trading = data.setdefault("trading", {})
+        current = trading.get("risk_per_trade")
+        if current != payload.risk_per_trade:
+            trading["risk_per_trade"] = round(payload.risk_per_trade, 6)
+            changes["risk_per_trade"] = trading["risk_per_trade"]
+
+    if payload.soft_atr_multiplier is not None:
+        risk = data.setdefault("risk_management", {})
+        stops = risk.setdefault("stops", {})
+        current = stops.get("soft_atr_multiplier")
+        if current != payload.soft_atr_multiplier:
+            stops["soft_atr_multiplier"] = round(payload.soft_atr_multiplier, 6)
+            changes["soft_atr_multiplier"] = stops["soft_atr_multiplier"]
+
+    if payload.spread_budget_bps is not None:
+        paper = data.setdefault("paper", {})
+        current = paper.get("max_slippage_bps")
+        if current != payload.spread_budget_bps:
+            paper["max_slippage_bps"] = round(payload.spread_budget_bps, 4)
+            changes["max_slippage_bps"] = paper["max_slippage_bps"]
+
+    return changes
+
+
+@app.post("/api/config/stage", response_model=ConfigStageResponse)
+async def stage_config(payload: ConfigStageRequest) -> ConfigStageResponse:
+    async with _config_lock:
+        database = await _ensure_database()
+        current = _load_strategy_yaml()
+        staged = yaml.safe_load(yaml.safe_dump(current)) or {}
+        changes = _apply_safe_knobs(staged, payload)
+
+        if not changes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No changes detected for staging.",
+            )
+
+        version = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6]}"
+        config_blob = yaml.safe_dump(staged, sort_keys=False)
+
+        persisted = await database.upsert_config_version(version, config_blob)
+        if not persisted:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to persist staged configuration.",
+            )
+
+        return ConfigStageResponse(version=version, config=staged, changes=changes)
+
+
+@app.post("/api/config/apply/{version}", response_model=ConfigStageResponse)
+async def apply_config(version: str) -> ConfigStageResponse:
+    global _config
+
+    async with _config_lock:
+        database = await _ensure_database()
+        record = await database.get_config_version(version)
+        if record is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Config version {version} not found.",
+            )
+
+        candidate = yaml.safe_load(record.config) or {}
+        if not isinstance(candidate, dict):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Stored configuration is invalid.",
+            )
+
+        _persist_strategy_yaml(candidate)
+        os.environ["APP_MODE"] = candidate.get(
+            "app_mode", os.environ.get("APP_MODE", "paper")
+        )
+        _config = reload_config()
+        _update_trading_mode_metric(_config.app_mode)
+
+        return ConfigStageResponse(
+            version=version,
+            config=candidate,
+            changes={},
+        )

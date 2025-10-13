@@ -6,6 +6,7 @@
 - Updated the CI pipeline to drop `go build` while keeping lint/type/test stages and Trivy scans against the new Python images.
 - Refreshed documentation (README, `docs/PAPER_MODE.md`, `CHANGELOG.md`) to highlight the FastAPI architecture and published service URLs.
 - Extended `PaperBroker` with an execution-listener callback so fills are emitted back onto NATS by the execution service.
+- Rebuilt the Ops API with config staging/apply endpoints plus positions/trades snapshots backed by SQLite `config_versions` for auditability.
 
 ## Pending / Next Steps
 1. **Runtime validation**
@@ -21,4 +22,4 @@
 
 ## Quick Reference
 - Validation commands to run post-refactor: `python -m ruff check .`, `python -m black --check .`, `python -m mypy src`, `python -m pytest`, `docker compose build`.
-- Key files touched: `src/services/*`, `src/paper_trader.py`, `docker-compose.yml`, `Dockerfile`, `requirements.txt`, `.github/workflows/ci.yml`, `README.md`, `docs/PAPER_MODE.md`, `CHANGELOG.md`.
+- Key files touched: `src/services/*`, `src/ops_api_service.py`, `src/database.py`, `SERVICES.md`, `docker-compose.yml`, `Dockerfile`, `requirements.txt`, `.github/workflows/ci.yml`, `README.md`, `docs/PAPER_MODE.md`, `CHANGELOG.md`.

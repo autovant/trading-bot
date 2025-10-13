@@ -4,35 +4,35 @@ The trading bot uses a microservices architecture with NATS messaging for commun
 
 ## Services Overview
 
-### 1. Feed Handler Service
-- **Language**: Go
-- **Purpose**: Handles market data ingestion and distribution
+### 1. Feed Service
+- **Language**: Python (FastAPI)
+- **Purpose**: Handles market data ingestion and replay streaming
 - **Communication**: Publishes market data to NATS
-- **Docker**: `feed-handler` service
+- **Docker**: `feature-engine` service (`uvicorn src.services.feed:app`)
 
 ### 2. Execution Service
-- **Language**: Go
-- **Purpose**: Handles order execution and execution reports
+- **Language**: Python (FastAPI)
+- **Purpose**: Handles order execution, fills, and paper broker callbacks
 - **Communication**: Subscribes to order requests, publishes execution reports
-- **Docker**: `execution-service` service
+- **Docker**: `execution` service (`uvicorn src.services.execution:app`)
 
 ### 3. Risk State Service
-- **Language**: Go
+- **Language**: Python (FastAPI)
 - **Purpose**: Monitors and manages risk state (crisis mode, drawdown, etc.)
 - **Communication**: Subscribes to risk management topics, publishes risk state
-- **Docker**: `risk-state` service
+- **Docker**: `risk-state` service (`uvicorn src.services.risk:app`)
 
 ### 4. Reporter Service
-- **Language**: Go
-- **Purpose**: Generates performance reports and metrics
+- **Language**: Python (FastAPI)
+- **Purpose**: Generates performance reports and exposes Prometheus metrics
 - **Communication**: Subscribes to performance metrics, publishes reports
-- **Docker**: `reporter` service
+- **Docker**: `reporter` service (`uvicorn src.services.reporter:app`)
 
 ### 5. Ops API Service
-- **Language**: Go
-- **Purpose**: Provides operational APIs for monitoring and control
-- **Communication**: HTTP REST API
-- **Docker**: `ops-api` service
+- **Language**: Python (FastAPI)
+- **Purpose**: Provides operational APIs for monitoring, mode switching, and config management
+- **Communication**: HTTP REST API + NATS notifications
+- **Docker**: `ops-api` service (`uvicorn src.ops_api_service:app`)
 
 ## NATS Messaging
 
@@ -60,17 +60,17 @@ This will start:
 - NATS server
 - Trading bot (Python)
 - Dashboard (Python)
-- Feed handler (Go)
-- Execution service (Go)
-- Risk state service (Go)
-- Reporter service (Go)
-- Ops API service (Go)
+- Feature engine / feed service (FastAPI)
+- Execution service (FastAPI)
+- Risk state service (FastAPI)
+- Reporter service (FastAPI)
+- Ops API service (FastAPI)
 
 ## Health Checks
 
 All services include health checks:
 - Python services: Database connectivity
-- Go services: Process health
+- FastAPI services: Application and dependency health
 - NATS: HTTP monitoring endpoint
 
 ## Configuration
