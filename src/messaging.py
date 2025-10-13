@@ -112,9 +112,7 @@ class MessagingClient:
 
         if self.nc is None:
             if not callable(_NATSClientFactory):
-                logger.warning(
-                    "NATS client factory unavailable; messaging disabled."
-                )
+                logger.warning("NATS client factory unavailable; messaging disabled.")
                 return
             self.nc = _NATSClientFactory()
 

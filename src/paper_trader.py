@@ -538,6 +538,13 @@ class PaperBroker:
                 net_cash = realized_pnl - fee_amount - funding
                 self._balance += net_cash
 
+                achieved_vs_signal = 0.0
+                if mark_price > 0:
+                    direction = 1 if order.side == "buy" else -1
+                    achieved_vs_signal = (
+                        direction * (mark_price - fill_price) / mark_price * 10_000
+                    )
+
                 trade = Trade(
                     client_id=f"{order.client_id}-{uuid.uuid4().hex[:6]}",
                     trade_id=f"{order.order_id}-{uuid.uuid4().hex[:6]}",
@@ -552,6 +559,7 @@ class PaperBroker:
                     realized_pnl=realized_pnl,
                     mark_price=mark_price,
                     slippage_bps=slippage_bps,
+                    achieved_vs_signal_bps=achieved_vs_signal,
                     latency_ms=delay_ms,
                     maker=maker,
                     mode=self.mode,
@@ -622,6 +630,7 @@ class PaperBroker:
                     "funding": funding,
                     "realized_pnl": realized_pnl,
                     "slippage_bps": slippage_bps,
+                    "achieved_vs_signal_bps": achieved_vs_signal,
                     "maker": maker,
                     "latency_ms": delay_ms,
                     "ack_latency_ms": delay_ms,
@@ -658,6 +667,7 @@ class PaperBroker:
                     "funding": 0.0,
                     "realized_pnl": 0.0,
                     "slippage_bps": 0.0,
+                    "achieved_vs_signal_bps": 0.0,
                     "maker": False,
                     "latency_ms": delay_ms,
                     "ack_latency_ms": delay_ms,

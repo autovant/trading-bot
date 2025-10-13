@@ -139,6 +139,7 @@ class TradingStrategy:
                     realized_pnl=report.get("realized_pnl", 0.0),
                     mark_price=report.get("mark_price", report["price"]),
                     slippage_bps=report.get("slippage_bps", 0.0),
+                    achieved_vs_signal_bps=report.get("achieved_vs_signal_bps", 0.0),
                     latency_ms=report.get("latency_ms", 0.0),
                     maker=report.get("maker", False),
                     mode=self.mode,

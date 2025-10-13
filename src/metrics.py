@@ -5,7 +5,9 @@ Prometheus metrics definitions for the trading bot.
 from prometheus_client import Gauge, Histogram, Counter
 
 # General Metrics
-TRADING_MODE = Gauge("trading_mode", "Current trading mode", ["mode"])
+TRADING_MODE = Gauge(
+    "trading_mode", "Current trading mode by service", ["service", "mode"]
+)
 
 # Latency Metrics
 SIGNAL_ACK_LATENCY = Histogram(

@@ -69,6 +69,7 @@ class Trade(DBModel):
     realized_pnl: float = 0.0
     mark_price: float = 0.0
     slippage_bps: float = 0.0
+    achieved_vs_signal_bps: float = 0.0
     latency_ms: float = 0.0
     maker: bool = False
     mode: Mode = "paper"
@@ -243,15 +244,16 @@ class DatabaseManager:
                 price REAL NOT NULL,
                 commission REAL NOT NULL DEFAULT 0,
                 fees REAL NOT NULL DEFAULT 0,
-                funding REAL NOT NULL DEFAULT 0,
-                realized_pnl REAL NOT NULL DEFAULT 0,
-                mark_price REAL NOT NULL DEFAULT 0,
-                slippage_bps REAL NOT NULL DEFAULT 0,
-                latency_ms REAL NOT NULL DEFAULT 0,
-                maker INTEGER NOT NULL DEFAULT 0,
-                timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """
+                 funding REAL NOT NULL DEFAULT 0,
+                 realized_pnl REAL NOT NULL DEFAULT 0,
+                 mark_price REAL NOT NULL DEFAULT 0,
+                 slippage_bps REAL NOT NULL DEFAULT 0,
+                 achieved_vs_signal_bps REAL NOT NULL DEFAULT 0,
+                 latency_ms REAL NOT NULL DEFAULT 0,
+                 maker INTEGER NOT NULL DEFAULT 0,
+                 timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+             )
+         """
         )
 
         cursor.execute(
@@ -269,15 +271,29 @@ class DatabaseManager:
                 price REAL NOT NULL,
                 commission REAL NOT NULL DEFAULT 0,
                 fees REAL NOT NULL DEFAULT 0,
-                funding REAL NOT NULL DEFAULT 0,
-                realized_pnl REAL NOT NULL DEFAULT 0,
-                mark_price REAL NOT NULL DEFAULT 0,
-                slippage_bps REAL NOT NULL DEFAULT 0,
-                latency_ms REAL NOT NULL DEFAULT 0,
-                maker INTEGER NOT NULL DEFAULT 0,
-                timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """
+                 funding REAL NOT NULL DEFAULT 0,
+                 realized_pnl REAL NOT NULL DEFAULT 0,
+                 mark_price REAL NOT NULL DEFAULT 0,
+                 slippage_bps REAL NOT NULL DEFAULT 0,
+                 achieved_vs_signal_bps REAL NOT NULL DEFAULT 0,
+                 latency_ms REAL NOT NULL DEFAULT 0,
+                 maker INTEGER NOT NULL DEFAULT 0,
+                 timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+             )
+         """
+        )
+
+        self._ensure_column(
+            cursor,
+            "trades",
+            "achieved_vs_signal_bps",
+            "REAL NOT NULL DEFAULT 0",
+        )
+        self._ensure_column(
+            cursor,
+            "trades_shadow",
+            "achieved_vs_signal_bps",
+            "REAL NOT NULL DEFAULT 0",
         )
 
         cursor.execute(
@@ -391,6 +407,16 @@ class DatabaseManager:
             )
 
         self.connection.commit()
+
+    def _ensure_column(
+        self, cursor: sqlite3.Cursor, table: str, column: str, definition: str
+    ) -> None:
+        """Ensure a column exists on the given table, adding it if missing."""
+
+        cursor.execute(f"PRAGMA table_info({table})")
+        existing = {row["name"] for row in cursor.fetchall()}
+        if column not in existing:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     async def close(self) -> None:
         if self.connection:
@@ -534,8 +560,8 @@ class DatabaseManager:
                 INSERT INTO {table}
                 (client_id, trade_id, order_id, run_id, mode, symbol, side, quantity,
                  price, commission, fees, funding, realized_pnl, mark_price,
-                 slippage_bps, latency_ms, maker, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 slippage_bps, achieved_vs_signal_bps, latency_ms, maker, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(client_id) DO UPDATE SET
                     price = excluded.price,
                     commission = excluded.commission,
@@ -544,6 +570,7 @@ class DatabaseManager:
                     realized_pnl = excluded.realized_pnl,
                     mark_price = excluded.mark_price,
                     slippage_bps = excluded.slippage_bps,
+                    achieved_vs_signal_bps = excluded.achieved_vs_signal_bps,
                     latency_ms = excluded.latency_ms,
                     maker = excluded.maker,
                     timestamp = excluded.timestamp
@@ -564,6 +591,7 @@ class DatabaseManager:
                     trade.realized_pnl,
                     trade.mark_price,
                     trade.slippage_bps,
+                    trade.achieved_vs_signal_bps,
                     trade.latency_ms,
                     _bool_to_int(trade.maker),
                     (trade.timestamp or datetime.utcnow()).isoformat(),
@@ -616,6 +644,7 @@ class DatabaseManager:
                     realized_pnl=row["realized_pnl"],
                     mark_price=row["mark_price"],
                     slippage_bps=row["slippage_bps"],
+                    achieved_vs_signal_bps=row["achieved_vs_signal_bps"],
                     latency_ms=row["latency_ms"],
                     maker=bool(row["maker"]),
                     mode=row["mode"],

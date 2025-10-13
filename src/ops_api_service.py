@@ -20,7 +20,7 @@ import yaml
 from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, model_validator
-from prometheus_client import CONTENT_TYPE_LATEST, Gauge, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .config import (
     APP_MODE,
@@ -31,6 +31,7 @@ from .config import (
 )
 from .database import DatabaseManager
 from .messaging import MessagingClient
+from .metrics import TRADING_MODE
 
 MODES: List[APP_MODE] = ["live", "paper", "replay"]
 
@@ -105,6 +106,7 @@ class TradeResponse(BaseModel):
     realized_pnl: float
     mark_price: float
     slippage_bps: float
+    achieved_vs_signal_bps: float
     latency_ms: float
     maker: bool
     mode: APP_MODE
@@ -165,12 +167,6 @@ _database: Optional[DatabaseManager] = None
 _messaging: Optional[MessagingClient] = None
 _rollup_task: Optional[asyncio.Task[None]] = None
 
-_trading_mode_metric = Gauge(
-    "trading_mode",
-    "Current trading mode",
-    ["mode"],
-)
-
 
 async def _ensure_database() -> DatabaseManager:
     if _database is None:
@@ -189,7 +185,9 @@ def _strategy_config_path() -> Path:
 
 def _update_trading_mode_metric(mode: APP_MODE) -> None:
     for candidate in MODES:
-        _trading_mode_metric.labels(mode=candidate).set(1 if candidate == mode else 0)
+        TRADING_MODE.labels(service="ops-api", mode=candidate).set(
+            1 if candidate == mode else 0
+        )
 
 
 def _resolve_subject(name: str, default: str) -> str:
@@ -540,6 +538,7 @@ async def get_trades(
             realized_pnl=item.realized_pnl,
             mark_price=item.mark_price,
             slippage_bps=item.slippage_bps,
+            achieved_vs_signal_bps=item.achieved_vs_signal_bps,
             latency_ms=item.latency_ms,
             maker=item.maker,
             mode=item.mode,

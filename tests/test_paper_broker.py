@@ -101,6 +101,9 @@ async def test_market_order_slippage_and_fees():
     assert pytest.approx(trade.price, rel=1e-6) == expected_price
     expected_fee = expected_price * 1.0 * (7 / 10_000)
     assert pytest.approx(trade.fees, rel=1e-6) == expected_fee
+    expected_achieved = ((100 - expected_price) / 100) * 10_000
+    assert pytest.approx(trade.achieved_vs_signal_bps, rel=1e-3) == expected_achieved
+    assert trade.achieved_vs_signal_bps < 0
     assert trade.mode == "paper"
     assert not trade.maker
 

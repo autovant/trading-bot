@@ -9,7 +9,7 @@ This document describes the production-grade paper trading pipeline and how to c
 - **Latency distribution** – acknowledgements and fills are delayed according to `latency_ms.{mean,p95,jitter}` using a Gaussian sampler with clamping at zero.
 - **Fees & funding** – maker rebates / taker fees apply per fill, and hourly/8h funding accrues when `funding_enabled` is set.
 - **Risk & liquidation guardrails** - position sizing, configurable margin rules, and liquidation distance are tracked via `paper.max_leverage`, `paper.initial_margin_pct`, and `paper.maintenance_margin_pct`. Orders that would breach the 4x stop-distance buffer are rejected.
-- **Persistence & observability** - every fill records achieved price, mark-to-market, slippage bps, maker/taker flag, latency_ms, and is tagged with `{mode, run_id}`. Metrics for slippage, maker ratio, and signal->ack latency are exported via Prometheus.
+- **Persistence & observability** - every fill records achieved price, mark-to-market, `achieved_vs_signal_bps`, slippage bps, maker/taker flag, latency_ms, and is tagged with `{mode, run_id}`. Metrics for slippage, maker ratio, and signal->ack latency are exported via Prometheus.
 
 ## Limitations vs Live
 

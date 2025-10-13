@@ -377,6 +377,9 @@ def main():
         if not trades_df.empty and "maker" in trades_df.columns:
             maker_ratio = trades_df["maker"].mean()
             st.metric("Maker Ratio", f"{maker_ratio:.1%}")
+        if not trades_df.empty and "achieved_vs_signal_bps" in trades_df.columns:
+            avg_achieved = trades_df["achieved_vs_signal_bps"].mean()
+            st.metric("Avg Achieved vs Signal", f"{avg_achieved:.2f} bps")
         if not trades_df.empty and "latency_ms" in trades_df.columns:
             st.metric("Avg Fill Latency", f"{trades_df['latency_ms'].mean():.0f} ms")
 

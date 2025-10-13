@@ -58,7 +58,10 @@ class TradingEngine:
 
             # Start Prometheus metrics server
             start_http_server(8000)
-            TRADING_MODE.labels(mode=self.config.app_mode).set(1)
+            for candidate in ("live", "paper", "replay"):
+                TRADING_MODE.labels(service="engine", mode=candidate).set(
+                    1 if candidate == self.config.app_mode else 0
+                )
 
             # Initialize database
             self.database = DatabaseManager(self.config.database.path)

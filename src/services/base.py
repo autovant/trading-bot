@@ -13,7 +13,9 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
-from prometheus_client import CONTENT_TYPE_LATEST, Gauge, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+from ..metrics import TRADING_MODE
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +27,6 @@ class BaseService(ABC):
         self.name = name
         self._started = asyncio.Event()
         self._shutdown = asyncio.Event()
-        self._mode_gauge = Gauge(
-            f"{name}_trading_mode",
-            f"Trading mode reported by the {name} service",
-            ["mode"],
-        )
 
     async def start(self) -> None:
         logger.info("%s service starting", self.name)
@@ -50,7 +47,9 @@ class BaseService(ABC):
     def set_mode(self, mode: str) -> None:
         """Update Prometheus gauge for the active trading mode."""
         for candidate in ("live", "paper", "replay"):
-            self._mode_gauge.labels(mode=candidate).set(1 if candidate == mode else 0)
+            TRADING_MODE.labels(service=self.name, mode=candidate).set(
+                1 if candidate == mode else 0
+            )
 
     async def health(self) -> JSONResponse:
         """Return basic health information."""
