@@ -11,9 +11,10 @@ import asyncio
 import logging
 import os
 from collections import defaultdict
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 from uuid import uuid4
 
 import yaml
@@ -127,6 +128,48 @@ class RiskSnapshotResponse(BaseModel):
     payload: Dict[str, Any]
 
 
+class BacktestRequest(BaseModel):
+    symbol: str = Field(default="BTCUSDT", min_length=3, max_length=40)
+    start: date = Field(
+        default_factory=lambda: date.today().replace(day=1),
+        description="Start date (YYYY-MM-DD)",
+    )
+    end: date = Field(
+        default_factory=date.today, description="End date (YYYY-MM-DD)"
+    )
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> "BacktestRequest":
+        if self.start > self.end:
+            raise ValueError("Start date must be on or before end date.")
+        return self
+
+
+class BacktestJobResponse(BaseModel):
+    job_id: str
+    status: Literal["queued", "running", "completed", "failed"]
+    symbol: str
+    start: str
+    end: str
+    submitted_at: str
+    started_at: Optional[str]
+    completed_at: Optional[str]
+    result: Optional[Dict[str, Any]]
+    error: Optional[str]
+
+
+@dataclass
+class _BacktestJob:
+    job_id: str
+    payload: BacktestRequest
+    status: Literal["queued", "running", "completed", "failed"] = "queued"
+    submitted_at: datetime = field(default_factory=datetime.utcnow)
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
 class ConfigVersionResponse(BaseModel):
     version: str
     created_at: Optional[str] = None
@@ -166,6 +209,10 @@ _config: Optional[TradingBotConfig] = None
 _database: Optional[DatabaseManager] = None
 _messaging: Optional[MessagingClient] = None
 _rollup_task: Optional[asyncio.Task[None]] = None
+_backtest_lock = asyncio.Lock()
+_backtest_jobs: Dict[str, _BacktestJob] = {}
+_BACKTEST_HISTORY_LIMIT = 8
+_backtest_tasks: Dict[str, asyncio.Task[None]] = {}
 
 
 async def _ensure_database() -> DatabaseManager:
@@ -213,10 +260,98 @@ def _persist_strategy_yaml(data: Dict[str, Any]) -> None:
         yaml.safe_dump(data, handle, sort_keys=False)
 
 
+def _isoformat(value: datetime) -> str:
+    return value.isoformat(timespec="seconds")
+
+
 def _isoformat_or_none(value: Optional[datetime]) -> Optional[str]:
     if value is None:
         return None
-    return value.isoformat()
+    return _isoformat(value)
+
+
+def _normalise_json(value: Any) -> Any:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _normalise_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalise_json(item) for item in value]
+    if hasattr(value, "tolist"):
+        try:
+            return value.tolist()
+        except Exception:  # pragma: no cover - best effort
+            pass
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:  # pragma: no cover - best effort
+            pass
+    return value
+
+
+def _sanitize_backtest_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: _normalise_json(value) for key, value in result.items()}
+
+
+def _serialize_backtest_job(job: _BacktestJob) -> BacktestJobResponse:
+    return BacktestJobResponse(
+        job_id=job.job_id,
+        status=job.status,
+        symbol=job.payload.symbol,
+        start=job.payload.start.isoformat(),
+        end=job.payload.end.isoformat(),
+        submitted_at=_isoformat(job.submitted_at),
+        started_at=_isoformat_or_none(job.started_at),
+        completed_at=_isoformat_or_none(job.completed_at),
+        result=job.result,
+        error=job.error,
+    )
+
+
+def _purge_backtest_history() -> None:
+    if len(_backtest_jobs) <= _BACKTEST_HISTORY_LIMIT:
+        return
+    ordered = sorted(
+        _backtest_jobs.values(), key=lambda record: record.submitted_at, reverse=True
+    )
+    for stale in ordered[_BACKTEST_HISTORY_LIMIT:]:
+        _backtest_jobs.pop(stale.job_id, None)
+
+
+async def _run_backtest_job(job_id: str) -> None:
+    async with _backtest_lock:
+        job = _backtest_jobs.get(job_id)
+    if job is None:
+        return
+
+    job.status = "running"
+    job.started_at = datetime.utcnow()
+
+    try:
+        config = _config or get_config()
+        from tools.backtest import BacktestEngine  # Lazy import to avoid heavy startup
+
+        engine = BacktestEngine(config)
+        result = await engine.run_backtest(
+            job.payload.symbol,
+            job.payload.start.isoformat(),
+            job.payload.end.isoformat(),
+        )
+        if not result:
+            raise RuntimeError("Backtest returned an empty result.")
+
+        job.result = _sanitize_backtest_result(result)
+        job.status = "completed"
+    except Exception as exc:  # pragma: no cover - operational logging
+        logger.exception("Backtest job %s failed: %s", job_id, exc)
+        job.error = str(exc)
+        job.status = "failed"
+    finally:
+        job.completed_at = datetime.utcnow()
+        async with _backtest_lock:
+            _backtest_tasks.pop(job_id, None)
+            _purge_backtest_history()
 
 
 async def _publish_config_reload(version: str, config_body: Dict[str, Any]) -> None:
@@ -294,6 +429,17 @@ async def shutdown() -> None:
         except asyncio.CancelledError:
             pass
         _rollup_task = None
+
+    async with _backtest_lock:
+        tasks = list(_backtest_tasks.values())
+        _backtest_tasks.clear()
+
+    for task in tasks:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     if _messaging:
         await _messaging.close()
@@ -594,6 +740,44 @@ async def get_risk_snapshots(
         )
         for item in snapshots
     ]
+
+
+@app.post(
+    "/api/backtests",
+    response_model=BacktestJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def submit_backtest(payload: BacktestRequest) -> BacktestJobResponse:
+    job_id = uuid4().hex
+    job = _BacktestJob(job_id=job_id, payload=payload)
+
+    async with _backtest_lock:
+        _backtest_jobs[job_id] = job
+        _purge_backtest_history()
+
+    task = asyncio.create_task(_run_backtest_job(job_id))
+    _backtest_tasks[job_id] = task
+    return _serialize_backtest_job(job)
+
+
+@app.get("/api/backtests", response_model=List[BacktestJobResponse])
+async def list_backtests() -> List[BacktestJobResponse]:
+    async with _backtest_lock:
+        jobs = list(_backtest_jobs.values())
+    ordered = sorted(jobs, key=lambda record: record.submitted_at, reverse=True)
+    return [_serialize_backtest_job(job) for job in ordered]
+
+
+@app.get("/api/backtests/{job_id}", response_model=BacktestJobResponse)
+async def fetch_backtest(job_id: str) -> BacktestJobResponse:
+    async with _backtest_lock:
+        job = _backtest_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Backtest job {job_id} not found.",
+        )
+    return _serialize_backtest_job(job)
 
 
 def _apply_safe_knobs(

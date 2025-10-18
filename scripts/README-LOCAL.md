@@ -70,9 +70,10 @@ The script traps **Ctrl+C**, ensuring all managed processes shut down cleanly on
 - `.env.example` documents the baseline configuration and can be committed to source control.
 - If `DB_URL` is absent, services default to `sqlite+aiosqlite:///./dev.db`, enabling development without PostgreSQL.
 - Default port bindings:
-  - `OPS_PORT` – Ops API / FastAPI service (default `8080`).
-  - `FEED_PORT`, `EXEC_PORT`, `RISK_PORT`, `REPORTER_PORT`, `REPLAY_PORT` – supporting FastAPI microservices (default `8081-8085`).
-  - `UI_PORT` – Streamlit dashboard (default `8501`).
+  - `OPS_PORT` - Ops API / FastAPI service (default `8080`).
+  - `FEED_PORT`, `EXEC_PORT`, `RISK_PORT`, `REPORTER_PORT`, `REPLAY_PORT` - supporting FastAPI microservices (default `8081-8085`).
+  - `UI_PORT` - Streamlit dashboard (default `8501`).
+- The Streamlit dashboard reads `OPS_API_URL` and `REPLAY_URL` from `.env`. They default to `http://127.0.0.1:8080` and `http://127.0.0.1:8085` so the UI connects to locally hosted services without Docker networking aliases.
 
 ## Editing Service Definitions
 At the top of `deploy-local.ps1`, the `Get-ServiceDefinitions` function lists all managed services and their commands. Adjust the entries if you:
@@ -87,5 +88,9 @@ Each service entry defines the executable, arguments, log path, PID file, and he
 - **Python not detected**: Pass a path via `-Python C:\Python311\python.exe`.
 - **Health check fails**: Inspect the corresponding `logs\<service>.log`. The `status` action flags stopped processes and points to log files.
 - **Port conflicts**: Update the relevant `*_PORT` variables in `.env`, then restart. The script reloads `.env` on every invocation.
+- The Streamlit dashboard now exposes:
+  - **Overview**: live equity curve, open positions, recent trades, and risk snapshots (all fetched from the Ops API).
+  - **Configuration**: stage/apply strategy risk knobs and tweak paper-broker parameters directly through the API.
+  - **Backtesting**: queue historical runs via the Ops API and inspect results (PnL metrics, equity curve, trade list) once they complete.
 
-For additional customization—such as enabling JetStream in NATS or pointing at an external PostgreSQL database—edit `.env` accordingly before running `start`.
+For additional customization-such as enabling JetStream in NATS or pointing at an external PostgreSQL database-edit `.env` accordingly before running `start`.

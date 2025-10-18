@@ -56,7 +56,10 @@ class BacktestEngine:
             )
 
             # Initialize exchange client for data fetching
-            exchange = ExchangeClient(self.config.exchange)
+            exchange = ExchangeClient(
+                self.config.exchange,
+                app_mode="live",
+            )
             await exchange.initialize()
 
             # Fetch historical data for all timeframes

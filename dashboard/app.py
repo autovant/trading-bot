@@ -1,62 +1,139 @@
 """
-Streamlit dashboard for trading bot monitoring and performance analysis.
+Trading bot control center presented via Streamlit.
+
+The dashboard talks to the ops FastAPI service only (no direct DB access)
+so it works identically for Docker and local-hosted deployments.
 """
 
-import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
+from __future__ import annotations
+
 import os
-from typing import List, Optional
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, List, Optional
+
+import pandas as pd
 import requests
-
-from src.config import get_config
-
-OPS_API_URL = os.getenv("OPS_API_URL", "http://ops-api:8082")
-REPLAY_URL = os.getenv("REPLAY_URL", "http://replay-service:8085")
+import streamlit as st
 
 
-def fetch_mode():
+OPS_API_URL = os.getenv("OPS_API_URL", "http://127.0.0.1:8080").rstrip("/")
+REPLAY_URL = os.getenv("REPLAY_URL", "http://127.0.0.1:8085").rstrip("/")
+API_TIMEOUT = float(os.getenv("OPS_API_TIMEOUT", "8"))
+
+ACCENT_COLOR = "#6366F1"
+
+
+class ApiError(RuntimeError):
+    """Raised when the ops API request fails."""
+
+
+def _build_url(base: str, path: str) -> str:
+    if path.startswith(("http://", "https://")):
+        return path
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{base}{path}"
+
+
+def api_request(method: str, path: str, **kwargs: Any) -> Any:
+    """Perform an HTTP request to the ops API and return decoded data."""
+
+    url = _build_url(OPS_API_URL, path)
     try:
-        resp = requests.get(f"{OPS_API_URL}/api/mode", timeout=2)
-        if resp.ok:
-            return resp.json()
-    except requests.RequestException:
+        response = requests.request(method, url, timeout=API_TIMEOUT, **kwargs)
+    except requests.RequestException as exc:  # pragma: no cover - network guard
+        raise ApiError(str(exc)) from exc
+
+    if response.status_code >= 400:
+        detail: Any
+        try:
+            payload = response.json()
+            detail = payload.get("detail", payload)
+        except ValueError:
+            detail = response.text
+        raise ApiError(f"{response.status_code}: {detail}")
+
+    if not response.content:
         return None
-    return None
 
-
-def update_mode(mode: str) -> bool:
     try:
-        resp = requests.post(f"{OPS_API_URL}/api/mode", json={"mode": mode}, timeout=2)
-        return resp.ok
-    except requests.RequestException:
-        return False
+        return response.json()
+    except ValueError:
+        return response.text
 
 
-def fetch_paper_config():
-    try:
-        resp = requests.get(f"{OPS_API_URL}/api/paper/config", timeout=2)
-        if resp.ok:
-            return resp.json()
-    except requests.RequestException:
+def _clear_caches() -> None:
+    """Invalidate cached fetches."""
+
+    get_mode_data.clear()
+    get_positions_data.clear()
+    get_trades_data.clear()
+    get_daily_pnl.clear()
+    get_paper_config.clear()
+    get_config_snapshot.clear()
+    list_config_versions.clear()
+    get_backtests.clear()
+    get_risk_snapshots.clear()
+
+
+@st.cache_data(ttl=10)
+def get_mode_data() -> Dict[str, Any]:
+    return api_request("GET", "/api/mode")
+
+
+@st.cache_data(ttl=10)
+def get_positions_data(limit: int = 100) -> List[Dict[str, Any]]:
+    return api_request("GET", "/api/positions", params={"limit": limit})
+
+
+@st.cache_data(ttl=10)
+def get_trades_data(limit: int = 100) -> List[Dict[str, Any]]:
+    return api_request("GET", "/api/trades", params={"limit": limit})
+
+
+@st.cache_data(ttl=15)
+def get_daily_pnl(days: int = 30, mode: Optional[str] = None) -> Dict[str, Any]:
+    params: Dict[str, Any] = {"days": days}
+    if mode:
+        params["mode"] = mode
+    return api_request("GET", "/api/pnl/daily", params=params)
+
+
+@st.cache_data(ttl=20)
+def get_paper_config() -> Dict[str, Any]:
+    return api_request("GET", "/api/paper/config")
+
+
+@st.cache_data(ttl=20)
+def get_config_snapshot() -> Dict[str, Any]:
+    return api_request("GET", "/api/config")
+
+
+@st.cache_data(ttl=20)
+def list_config_versions(limit: int = 5) -> List[Dict[str, Any]]:
+    return api_request("GET", "/api/config/versions", params={"limit": limit})
+
+
+@st.cache_data(ttl=10)
+def get_backtests() -> List[Dict[str, Any]]:
+    return api_request("GET", "/api/backtests")
+
+
+@st.cache_data(ttl=10)
+def get_risk_snapshots(limit: int = 10) -> List[Dict[str, Any]]:
+    return api_request("GET", "/api/risk/snapshots", params={"limit": limit})
+
+
+def get_replay_status() -> Optional[Dict[str, Any]]:
+    if not REPLAY_URL:
         return None
-    return None
-
-
-def update_paper_config(payload: dict) -> bool:
     try:
-        resp = requests.post(f"{OPS_API_URL}/api/paper/config", json=payload, timeout=2)
-        return resp.ok
-    except requests.RequestException:
-        return False
-
-
-def fetch_replay_status() -> Optional[dict]:
-    try:
-        resp = requests.get(f"{REPLAY_URL}/status", timeout=2)
-        if resp.ok:
-            return resp.json()
+        response = requests.get(
+            _build_url(REPLAY_URL, "/status"),
+            timeout=API_TIMEOUT,
+        )
+        if response.ok:
+            return response.json()
     except requests.RequestException:
         return None
     return None
@@ -64,511 +141,586 @@ def fetch_replay_status() -> Optional[dict]:
 
 def control_replay(action: str) -> bool:
     try:
-        resp = requests.post(
-            f"{REPLAY_URL}/control", json={"action": action}, timeout=2
+        response = requests.post(
+            _build_url(REPLAY_URL, "/control"),
+            json={"action": action},
+            timeout=API_TIMEOUT,
         )
-        return resp.ok
+        return response.ok
     except requests.RequestException:
         return False
 
 
-def fetch_risk_snapshots(limit: int = 40) -> List[dict]:
-    try:
-        resp = requests.get(
-            f"{OPS_API_URL}/api/risk/snapshots",
-            params={"limit": limit},
-            timeout=2,
-        )
-        if resp.ok:
-            return resp.json()
-    except requests.RequestException:
-        return []
-    return []
-
-
-# Page configuration
-st.set_page_config(
-    page_title="Crypto Trading Bot Dashboard",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# Custom CSS
-st.markdown(
-    """
-<style>
-    .metric-card {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 4px solid #1f77b4;
-    }
-    .positive { color: #00ff00; }
-    .negative { color: #ff0000; }
-    .neutral { color: #ffa500; }
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-
-@st.cache_data(ttl=30)  # Cache for 30 seconds
-def load_data():
-    """Load data from database."""
-    try:
-        config = get_config()
-
-        # This is a simplified sync version for Streamlit
-        # In production, you'd want to use async properly
-        import sqlite3
-
-        conn = sqlite3.connect(config.database.path)
-
-        # Get recent trades
-        trades_df = pd.read_sql_query(
-            """
-            SELECT * FROM trades 
-            ORDER BY timestamp DESC 
-            LIMIT 100
-        """,
-            conn,
-        )
-
-        if not trades_df.empty:
-            if "maker" in trades_df.columns:
-                trades_df["maker"] = trades_df["maker"].astype(bool)
-            if "is_shadow" in trades_df.columns:
-                trades_df["is_shadow"] = trades_df["is_shadow"].astype(bool)
-
-        # Get positions
-        positions_df = pd.read_sql_query(
-            """
-            SELECT * FROM positions 
-            WHERE size > 0
-            ORDER BY updated_at DESC
-        """,
-            conn,
-        )
-
-        # Get PnL history
-        pnl_df = pd.read_sql_query(
-            """
-            SELECT * FROM pnl_ledger 
-            WHERE timestamp >= datetime('now', '-30 days')
-            ORDER BY timestamp ASC
-        """,
-            conn,
-        )
-
-        # Get performance metrics
-        performance = pd.read_sql_query(
-            """
-            SELECT * FROM strategy_performance 
-            WHERE id = 1
-        """,
-            conn,
-        )
-
-        conn.close()
-
-        return trades_df, positions_df, pnl_df, performance
-
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-
-def main():
-    """Main dashboard function."""
-
-    config = get_config()
-    mode_info = fetch_mode() or {}
-    current_mode = mode_info.get("mode", config.app_mode)
-    shadow_enabled = mode_info.get("shadow", False)
-
-    try:
-        paper_defaults = config.paper.model_dump()
-    except AttributeError:
-        paper_defaults = {
-            "fee_bps": config.paper.fee_bps,
-            "maker_rebate_bps": config.paper.maker_rebate_bps,
-            "slippage_bps": config.paper.slippage_bps,
-            "max_slippage_bps": config.paper.max_slippage_bps,
-            "funding_enabled": config.paper.funding_enabled,
-            "price_source": config.paper.price_source,
-            "spread_slippage_coeff": getattr(
-                config.paper, "spread_slippage_coeff", 0.5
-            ),
-            "ofi_slippage_coeff": getattr(config.paper, "ofi_slippage_coeff", 0.35),
-            "latency_ms": getattr(
-                config.paper, "latency_ms", {"mean": 120, "p95": 300}
-            ),
-            "partial_fill": getattr(
-                config.paper,
-                "partial_fill",
-                {"enabled": True, "min_slice_pct": 0.15, "max_slices": 4},
-            ),
-        }
-    paper_config = fetch_paper_config() or paper_defaults
-
-    trades_df, positions_df, pnl_df, performance_df = load_data()
-    replay_status = fetch_replay_status() or {}
-    risk_snapshots = fetch_risk_snapshots()
-
-    st.title("🚀 Crypto Trading Bot Dashboard")
-    badge_color = {
-        "paper": "#1f8b4c",
-        "live": "#d9534f",
-        "replay": "#f0ad4e",
-    }.get(current_mode, "#6c757d")
+def _style_app() -> None:
+    st.set_page_config(
+        page_title="Trading Control Center",
+        page_icon="📈",
+        layout="wide",
+    )
     st.markdown(
-        f"<span style='display:inline-block;padding:6px 12px;border-radius:4px;background-color:{badge_color};color:white;font-weight:600;'>MODE: {current_mode.upper()}</span>",
+        f"""
+        <style>
+        :root {{
+            --accent: {ACCENT_COLOR};
+        }}
+        div.block-container {{
+            padding-top: 1.6rem;
+        }}
+        .metric-card {{
+            background: linear-gradient(135deg, rgba(99,102,241,0.15), rgba(99,102,241,0.05));
+            border-radius: 14px;
+            padding: 1rem 1.2rem;
+            border: 1px solid rgba(99,102,241,0.25);
+        }}
+        .status-badge {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            background-color: rgba(99,102,241,0.15);
+            color: var(--accent);
+            border-radius: 999px;
+            padding: 0.25rem 0.75rem;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }}
+        </style>
+        """,
         unsafe_allow_html=True,
     )
-    if shadow_enabled:
-        st.caption("Shadow paper trading enabled")
-    st.markdown("---")
 
-    status_col, risk_col = st.columns([1, 1])
 
-    with status_col:
-        st.subheader("Replay Service")
-        replay_state = replay_status.get("state", "unknown")
-        st.metric("State", replay_state.title())
-        dataset_size = replay_status.get("dataset_size")
-        interval = replay_status.get("interval")
-        if dataset_size is not None and interval is not None:
-            st.caption(f"{dataset_size} snapshots | interval {interval:.2f}s")
-        last_action = replay_status.get("last_control")
-        last_action_at = replay_status.get("last_control_at")
-        if last_action_at:
-            try:
-                ts = pd.to_datetime(last_action_at)
-                st.caption(
-                    f"Last action: {last_action or 'n/a'} @ {ts:%Y-%m-%d %H:%M:%S}"
-                )
-            except Exception:
-                st.caption(f"Last action: {last_action or 'n/a'}")
+def _render_sidebar(mode_data: Dict[str, Any]) -> None:
+    st.sidebar.header("Run Controls")
+    current_mode = mode_data.get("mode", "paper")
+    shadow_enabled = mode_data.get("shadow", False)
 
-        replay_controls = st.columns(2)
-        with replay_controls[0]:
-            if st.button(
-                "Pause Replay",
-                key="pause_replay",
-                disabled=replay_state == "paused",
-            ):
-                if control_replay("pause"):
-                    st.success("Replay paused")
-                    st.experimental_rerun()
-                else:
-                    st.error("Failed to pause replay")
-        with replay_controls[1]:
-            if st.button(
-                "Resume Replay",
-                key="resume_replay",
-                disabled=replay_state == "running",
-            ):
-                if control_replay("resume"):
-                    st.success("Replay resumed")
-                    st.experimental_rerun()
-                else:
-                    st.error("Failed to resume replay")
+    mode_choice = st.sidebar.selectbox(
+        "Deployment Mode",
+        options=["paper", "replay", "live"],
+        index=["paper", "replay", "live"].index(current_mode)
+        if current_mode in ("paper", "replay", "live")
+        else 0,
+    )
 
-    with risk_col:
-        st.subheader("Risk Stream")
-        if risk_snapshots:
-            risk_df = pd.DataFrame(risk_snapshots)
-            if "created_at" in risk_df.columns:
-                risk_df["created_at"] = pd.to_datetime(risk_df["created_at"])
-                risk_df.sort_values("created_at", inplace=True)
-            latest = risk_df.iloc[-1]
-            st.metric(
-                "Crisis Mode",
-                "Active" if bool(latest["crisis_mode"]) else "Normal",
+    shadow_choice = st.sidebar.toggle(
+        "Shadow Paper (mirror fills in paper broker)",
+        value=bool(shadow_enabled),
+    )
+
+    if st.sidebar.button("Apply Mode", use_container_width=True):
+        try:
+            api_request(
+                "POST",
+                "/api/mode",
+                json={"mode": mode_choice, "shadow": shadow_choice},
             )
-            drawdown_pct = float(latest.get("drawdown", 0.0)) * 100
-            volatility_pct = float(latest.get("volatility", 0.0)) * 100
-            st.metric("Drawdown", f"{drawdown_pct:.1f}%")
-            st.metric("Volatility", f"{volatility_pct:.1f}%")
-            trend_df = risk_df.tail(60)
-            fig_risk = px.line(
-                trend_df,
-                x="created_at" if "created_at" in trend_df.columns else trend_df.index,
-                y="drawdown",
-                title="Drawdown (recent snapshots)",
-                labels={"created_at": "Timestamp", "drawdown": "Drawdown"},
-            )
-            fig_risk.update_layout(height=260, showlegend=False)
-            st.plotly_chart(fig_risk, use_container_width=True)
-        else:
-            st.info("Risk stream snapshots not available yet.")
+            st.sidebar.success("Mode updated.")
+            get_mode_data.clear()
+        except ApiError as exc:
+            st.sidebar.error(f"Unable to switch mode: {exc}")
 
-    st.markdown("---")
-
-    has_positions = not positions_df.empty and current_mode != "paper"
-
-    controls_col, refresh_col = st.columns([1, 1])
-    with controls_col:
-        disabled = current_mode == "paper" or has_positions
-        if st.button("Switch to Paper Mode", disabled=disabled):
-            if update_mode("paper"):
-                st.success("Mode switched to PAPER")
-                st.experimental_rerun()
-            else:
-                st.error("Failed to switch mode")
-        if has_positions:
-            st.caption("Close positions before switching mode.")
-
-    with refresh_col:
-        if st.button("🔄 Refresh Data"):
-            st.cache_data.clear()
-            st.experimental_rerun()
-
-    st.markdown("---")
-
-    if not performance_df.empty:
-        perf = performance_df.iloc[0]
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric(
-                "💰 Total P&L",
-                f"${perf['total_pnl']:.2f}",
-                delta=f"{perf['total_pnl']:.2f}",
-            )
-        with col2:
-            st.metric(
-                "📈 Win Rate",
-                f"{perf['win_rate']:.1f}%",
-                delta=f"{perf['win_rate'] - 50:.1f}%",
-            )
-        with col3:
-            st.metric(
-                "🎯 Profit Factor",
-                f"{perf['profit_factor']:.2f}",
-                delta=f"{perf['profit_factor'] - 1:.2f}",
-            )
-        with col4:
-            st.metric(
-                "📉 Max Drawdown",
-                f"{perf['max_drawdown']:.1f}%",
-                delta=f"{perf['max_drawdown']:.1f}%",
-                delta_color="inverse",
-            )
-
-    st.markdown("---")
-
-    st.subheader("🧪 Paper Trading Insights")
-    insight_col1, insight_col2 = st.columns([2, 1])
-
-    with insight_col1:
-        if not trades_df.empty and "slippage_bps" in trades_df.columns:
-            slippage_fig = px.histogram(
-                trades_df,
-                x="slippage_bps",
-                nbins=20,
-                title="Fill Slippage (bps)",
-            )
-            st.plotly_chart(slippage_fig, use_container_width=True)
-        else:
-            st.info("No fill data available yet.")
-
-    with insight_col2:
-        if not trades_df.empty and "maker" in trades_df.columns:
-            maker_ratio = trades_df["maker"].mean()
-            st.metric("Maker Ratio", f"{maker_ratio:.1%}")
-        if not trades_df.empty and "achieved_vs_signal_bps" in trades_df.columns:
-            avg_achieved = trades_df["achieved_vs_signal_bps"].mean()
-            st.metric("Avg Achieved vs Signal", f"{avg_achieved:.2f} bps")
-        if not trades_df.empty and "latency_ms" in trades_df.columns:
-            st.metric("Avg Fill Latency", f"{trades_df['latency_ms'].mean():.0f} ms")
-
-    if (
-        not trades_df.empty
-        and "is_shadow" in trades_df.columns
-        and trades_df["is_shadow"].nunique() > 1
-    ):
-        st.subheader("📊 Live vs Shadow Performance")
-        comparison = trades_df.copy()
-        comparison["timestamp"] = pd.to_datetime(comparison["timestamp"])
-        comparison.sort_values("timestamp", inplace=True)
-        comparison["equity"] = comparison.groupby("is_shadow")["realized_pnl"].cumsum()
-        fig_shadow = px.line(
-            comparison,
-            x="timestamp",
-            y="equity",
-            color=comparison["is_shadow"].map({False: "live", True: "shadow"}),
-            labels={"color": "Mode", "equity": "Cumulative PnL"},
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Replay Controls")
+    replay_state = get_replay_status()
+    if replay_state:
+        st.sidebar.caption(
+            f"Replay status: **{replay_state.get('state', 'unknown').title()}**"
         )
-        st.plotly_chart(fig_shadow, use_container_width=True)
-
-    st.markdown("---")
-
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        st.subheader("📈 Equity Curve")
-        if not pnl_df.empty:
-            fig = go.Figure()
-            fig.add_trace(
-                go.Scatter(
-                    x=pd.to_datetime(pnl_df["timestamp"]),
-                    y=pnl_df["balance"],
-                    mode="lines",
-                    name="Account Balance",
-                    line=dict(color="#1f77b4", width=2),
-                )
-            )
-            fig.update_layout(
-                title="Account Balance Over Time",
-                xaxis_title="Date",
-                yaxis_title="Balance ($)",
-                hovermode="x unified",
-                height=400,
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No P&L data available yet.")
-
-    with col2:
-        st.subheader("📊 Active Positions")
-        if not positions_df.empty:
-            for _, pos in positions_df.iterrows():
-                pnl_color = "positive" if pos["unrealized_pnl"] > 0 else "negative"
-                st.markdown(
-                    f"""
-                <div class="metric-card">
-                    <strong>{pos['symbol']}</strong><br>
-                    Side: {pos['side']}<br>
-                    Size: {pos['size']:.4f}<br>
-                    Entry: ${pos['entry_price']:.2f}<br>
-                    Mark: ${pos['mark_price']:.2f}<br>
-                    <span class="{pnl_color}">P&L: ${pos['unrealized_pnl']:.2f} ({pos['percentage']:.2f}%)</span>
-                </div>
-                """,
-                    unsafe_allow_html=True,
-                )
-                st.markdown("<br>", unsafe_allow_html=True)
-        else:
-            st.info("No active positions.")
-
-    st.markdown("---")
-
-    st.subheader("📋 Recent Trades")
-    if not trades_df.empty:
-        symbols = ["All"] + sorted(trades_df["symbol"].unique())
-        selected_symbol = st.selectbox("Filter by Symbol", symbols)
-        trades_view = trades_df.copy()
-        if selected_symbol != "All":
-            trades_view = trades_view[trades_view["symbol"] == selected_symbol]
-        st.dataframe(trades_view.head(50))
     else:
-        st.info("No trades recorded yet.")
+        st.sidebar.caption("Replay service unreachable.")
 
-    st.markdown("---")
+    replay_cols = st.sidebar.columns(2)
+    if replay_cols[0].button("Pause", use_container_width=True):
+        if control_replay("pause"):
+            st.sidebar.success("Replay paused.")
+        else:
+            st.sidebar.warning("Pause command failed.")
+    if replay_cols[1].button("Resume", use_container_width=True):
+        if control_replay("resume"):
+            st.sidebar.success("Replay resumed.")
+        else:
+            st.sidebar.warning("Resume command failed.")
 
-    st.subheader("🧮 P&L Breakdown")
-    if not pnl_df.empty:
-        st.dataframe(pnl_df.tail(30))
+    st.sidebar.markdown("---")
+    if st.sidebar.button("Refresh Data", use_container_width=True):
+        _clear_caches()
+        st.experimental_rerun()
+
+
+def _render_overview_tab(mode_data: Dict[str, Any]) -> None:
+    col_a, col_b, col_c = st.columns(3)
+    col_a.markdown(
+        f"<div class='metric-card'><h4>Mode</h4><h2>{mode_data.get('mode', '-').upper()}</h2></div>",
+        unsafe_allow_html=True,
+    )
+    col_b.markdown(
+        f"<div class='metric-card'><h4>Shadow Paper</h4><h2>{'ENABLED' if mode_data.get('shadow') else 'DISABLED'}</h2></div>",
+        unsafe_allow_html=True,
+    )
+
+    try:
+        pnl_payload = get_daily_pnl(days=30)
+    except ApiError as exc:
+        st.error(f"Could not load PnL history: {exc}")
+        pnl_payload = {"days": []}
+
+    latest_net = 0.0
+    chart_df = pd.DataFrame()
+    if pnl_payload.get("days"):
+        pnl_df = pd.DataFrame(pnl_payload["days"])
+        pnl_df["date"] = pd.to_datetime(pnl_df["date"])
+        pnl_df.sort_values("date", inplace=True)
+        latest_net = pnl_df.iloc[-1]["net_pnl"]
+        chart_df = pnl_df.set_index("date")[["balance", "net_pnl"]]
+        chart_df.rename(columns={"balance": "Equity", "net_pnl": "Net PnL"}, inplace=True)
+
+    col_c.markdown(
+        f"<div class='metric-card'><h4>Latest Net PnL</h4><h2>${latest_net:,.2f}</h2></div>",
+        unsafe_allow_html=True,
+    )
+
+    if not chart_df.empty:
+        st.markdown("#### Equity Curve")
+        st.line_chart(chart_df, height=260)
     else:
-        st.info("No P&L records available.")
+        st.info("No PnL history yet. Run the bot to accumulate performance data.")
 
     st.markdown("---")
+    col_positions, col_risk = st.columns([2, 1])
 
-    st.subheader("⚙️ Paper Configuration")
+    try:
+        positions = get_positions_data(limit=100)
+    except ApiError as exc:
+        col_positions.error(f"Unable to load positions: {exc}")
+        positions = []
+
+    if positions:
+        pos_df = pd.DataFrame(positions)
+        display_cols = [
+            "symbol",
+            "side",
+            "size",
+            "entry_price",
+            "mark_price",
+            "unrealized_pnl",
+            "percentage",
+        ]
+        col_positions.markdown("#### Open Positions")
+        col_positions.dataframe(
+            pos_df[display_cols].rename(
+                columns={
+                    "entry_price": "Entry",
+                    "mark_price": "Mark",
+                    "unrealized_pnl": "Unrealised PnL",
+                    "percentage": "Portfolio %",
+                }
+            ),
+            use_container_width=True,
+        )
+    else:
+        col_positions.info("No open positions.")
+
+    try:
+        risk_snapshots = get_risk_snapshots(limit=5)
+    except ApiError as exc:
+        col_risk.error(f"Unable to fetch risk snapshots: {exc}")
+        risk_snapshots = []
+
+    col_risk.markdown("#### Recent Risk Snapshots")
+    if risk_snapshots:
+        for snapshot in risk_snapshots:
+            crisis = "⚠️" if snapshot["crisis_mode"] else "✅"
+            col_risk.markdown(
+                f"{crisis} {snapshot['created_at'] or '-'} · Drawdown: {snapshot['drawdown']:.2f} · "
+                f"Loss streak: {snapshot['consecutive_losses']} · Vol: {snapshot['volatility']:.2f}"
+            )
+    else:
+        col_risk.caption("No risk snapshots recorded yet.")
+
+    st.markdown("---")
+    st.markdown("#### Recent Trades")
+    try:
+        trades = get_trades_data(limit=150)
+    except ApiError as exc:
+        st.error(f"Unable to load trades: {exc}")
+        trades = []
+
+    if trades:
+        trades_df = pd.DataFrame(trades)
+        trades_df["timestamp"] = pd.to_datetime(trades_df["timestamp"])
+        trades_df.rename(
+            columns={
+                "timestamp": "Timestamp",
+                "symbol": "Symbol",
+                "side": "Side",
+                "quantity": "Qty",
+                "price": "Price",
+                "realized_pnl": "Realised",
+                "maker": "Maker",
+            },
+            inplace=True,
+        )
+        st.dataframe(
+            trades_df[
+                [
+                    "Timestamp",
+                    "Symbol",
+                    "Side",
+                    "Qty",
+                    "Price",
+                    "Realised",
+                    "slippage_bps",
+                    "latency_ms",
+                    "Maker",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.caption("No trades yet.")
+
+
+def _render_config_tab() -> None:
+    st.subheader("Strategy Configuration")
+    try:
+        config_snapshot = get_config_snapshot()
+    except ApiError as exc:
+        st.error(f"Could not load configuration: {exc}")
+        return
+
+    config_data = config_snapshot.get("config", {})
+    trading = config_data.get("trading", {})
+    risk_mgmt = config_data.get("risk_management", {})
+    stops = risk_mgmt.get("stops", {})
+    paper_defaults = config_data.get("paper", {})
+    stage_version = st.session_state.get("last_staged_version")
+
+    with st.form("strategy_knobs_form"):
+        col_a, col_b, col_c = st.columns(3)
+        risk_per_trade = col_a.number_input(
+            "Risk Per Trade",
+            min_value=0.001,
+            max_value=0.05,
+            value=float(trading.get("risk_per_trade", 0.006)),
+            step=0.001,
+            format="%.3f",
+        )
+        soft_atr_multiplier = col_b.number_input(
+            "Soft ATR Multiplier",
+            min_value=0.1,
+            max_value=5.0,
+            value=float(stops.get("soft_atr_multiplier", 1.5)),
+            step=0.1,
+        )
+        spread_budget_bps = col_c.number_input(
+            "Spread Budget (bps)",
+            min_value=1,
+            max_value=50,
+            value=int(paper_defaults.get("max_slippage_bps", 10)),
+        )
+        submitted = st.form_submit_button("Stage Changes")
+
+        if submitted:
+            payload: Dict[str, Any] = {}
+            if abs(risk_per_trade - trading.get("risk_per_trade", risk_per_trade)) > 1e-6:
+                payload["risk_per_trade"] = float(risk_per_trade)
+            if abs(soft_atr_multiplier - stops.get("soft_atr_multiplier", soft_atr_multiplier)) > 1e-6:
+                payload["soft_atr_multiplier"] = float(soft_atr_multiplier)
+            if int(spread_budget_bps) != int(paper_defaults.get("max_slippage_bps", spread_budget_bps)):
+                payload["spread_budget_bps"] = int(spread_budget_bps)
+
+            if not payload:
+                st.info("No changes detected.")
+            else:
+                try:
+                    staged = api_request("POST", "/api/config/stage", json=payload)
+                    st.success(f"Staged version {staged['version']} with changes {staged['changes']}.")
+                    st.session_state["last_staged_version"] = staged["version"]
+                    get_config_snapshot.clear()
+                    list_config_versions.clear()
+                except ApiError as exc:
+                    st.error(f"Unable to stage configuration: {exc}")
+
+    if stage_version:
+        if st.button(f"Apply staged version {stage_version}", type="primary"):
+            try:
+                api_request("POST", f"/api/config/apply/{stage_version}")
+                st.success(f"Applied configuration version {stage_version}.")
+                st.session_state.pop("last_staged_version", None)
+                get_config_snapshot.clear()
+                list_config_versions.clear()
+                get_mode_data.clear()
+            except ApiError as exc:
+                st.error(f"Apply failed: {exc}")
+
+    st.markdown("---")
+    st.subheader("Paper Broker Settings")
+    try:
+        paper_config = get_paper_config()
+    except ApiError as exc:
+        st.error(f"Unable to load paper configuration: {exc}")
+        paper_config = {}
+
     latency_cfg = paper_config.get("latency_ms", {"mean": 120, "p95": 300})
     partial_cfg = paper_config.get(
         "partial_fill", {"enabled": True, "min_slice_pct": 0.15, "max_slices": 4}
     )
 
     with st.form("paper_config_form"):
-        col_a, col_b = st.columns(2)
-        with col_a:
-            fee_bps = st.number_input(
-                "Fee (bps)", value=float(paper_config.get("fee_bps", 7)), step=0.5
-            )
-            maker_rebate = st.number_input(
-                "Maker Rebate (bps)",
-                value=float(paper_config.get("maker_rebate_bps", -1)),
-                step=0.5,
-            )
-            slippage_bps = st.number_input(
-                "Base Slippage (bps)",
-                value=float(paper_config.get("slippage_bps", 3)),
-                step=0.5,
-            )
-            max_slippage = st.number_input(
-                "Max Slippage (bps)",
-                value=float(paper_config.get("max_slippage_bps", 10)),
-                step=0.5,
-            )
-            spread_coeff = st.number_input(
-                "Spread Coefficient",
-                value=float(paper_config.get("spread_slippage_coeff", 0.5)),
-                step=0.05,
-            )
-        with col_b:
-            ofi_coeff = st.number_input(
-                "OFI Coefficient",
-                value=float(paper_config.get("ofi_slippage_coeff", 0.35)),
-                step=0.05,
-            )
-            latency_mean = st.number_input(
-                "Latency Mean (ms)", value=float(latency_cfg.get("mean", 120))
-            )
-            latency_p95 = st.number_input(
-                "Latency P95 (ms)", value=float(latency_cfg.get("p95", 300))
-            )
-            partial_enabled = st.checkbox(
-                "Partial Fill Enabled", value=bool(partial_cfg.get("enabled", True))
-            )
-            min_slice = st.number_input(
-                "Min Slice %",
-                value=float(partial_cfg.get("min_slice_pct", 0.15)),
-                min_value=0.0,
-                max_value=1.0,
-                step=0.01,
-            )
-            max_slices = st.number_input(
-                "Max Slices", value=int(partial_cfg.get("max_slices", 4)), min_value=1
-            )
+        col_1, col_2, col_3 = st.columns(3)
+        fee_bps = col_1.number_input(
+            "Taker Fee (bps)",
+            value=float(paper_config.get("fee_bps", 7)),
+            step=0.5,
+        )
+        maker_rebate_bps = col_2.number_input(
+            "Maker Rebate (bps)",
+            value=float(paper_config.get("maker_rebate_bps", -1)),
+            step=0.5,
+        )
+        slippage_bps = col_3.number_input(
+            "Base Slippage (bps)",
+            value=float(paper_config.get("slippage_bps", 3)),
+            step=0.5,
+        )
 
-        submitted = st.form_submit_button("Update Configuration")
-        if submitted:
+        col_4, col_5, col_6 = st.columns(3)
+        max_slippage_bps = col_4.number_input(
+            "Max Slippage (bps)",
+            value=float(paper_config.get("max_slippage_bps", 10)),
+            step=0.5,
+        )
+        spread_coeff = col_5.number_input(
+            "Spread Coefficient",
+            value=float(paper_config.get("spread_slippage_coeff", 0.5)),
+            step=0.05,
+        )
+        ofi_coeff = col_6.number_input(
+            "OFI Coefficient",
+            value=float(paper_config.get("ofi_slippage_coeff", 0.35)),
+            step=0.05,
+        )
+
+        col_7, col_8, col_9 = st.columns(3)
+        latency_mean = col_7.number_input(
+            "Latency Mean (ms)",
+            value=float(latency_cfg.get("mean", 120)),
+        )
+        latency_p95 = col_8.number_input(
+            "Latency P95 (ms)",
+            value=float(latency_cfg.get("p95", 300)),
+        )
+        partial_enabled = col_9.toggle(
+            "Partial Fills Enabled",
+            value=bool(partial_cfg.get("enabled", True)),
+        )
+
+        col_10, col_11, col_12 = st.columns(3)
+        min_slice_pct = col_10.number_input(
+            "Min Slice %",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(partial_cfg.get("min_slice_pct", 0.15)),
+            step=0.01,
+        )
+        max_slices = col_11.number_input(
+            "Max Slices",
+            min_value=1,
+            max_value=20,
+            value=int(partial_cfg.get("max_slices", 4)),
+        )
+        funding_enabled = col_12.toggle(
+            "Funding Enabled",
+            value=bool(paper_config.get("funding_enabled", True)),
+        )
+
+        price_source = st.selectbox(
+            "Price Source",
+            options=["live", "replay", "bars"],
+            index=["live", "replay", "bars"].index(paper_config.get("price_source", "live"))
+            if paper_config.get("price_source") in ("live", "replay", "bars")
+            else 0,
+        )
+
+        submit_paper = st.form_submit_button("Update Paper Settings")
+        if submit_paper:
             payload = {
-                "fee_bps": fee_bps,
-                "maker_rebate_bps": maker_rebate,
-                "slippage_bps": slippage_bps,
-                "max_slippage_bps": max_slippage,
-                "funding_enabled": bool(paper_config.get("funding_enabled", True)),
-                "price_source": paper_config.get("price_source", "live"),
-                "spread_slippage_coeff": spread_coeff,
-                "ofi_slippage_coeff": ofi_coeff,
-                "latency_ms": {"mean": latency_mean, "p95": latency_p95},
+                "fee_bps": float(fee_bps),
+                "maker_rebate_bps": float(maker_rebate_bps),
+                "funding_enabled": bool(funding_enabled),
+                "slippage_bps": float(slippage_bps),
+                "max_slippage_bps": float(max_slippage_bps),
+                "spread_slippage_coeff": float(spread_coeff),
+                "ofi_slippage_coeff": float(ofi_coeff),
+                "latency_ms": {"mean": float(latency_mean), "p95": float(latency_p95)},
                 "partial_fill": {
-                    "enabled": partial_enabled,
-                    "min_slice_pct": min_slice,
+                    "enabled": bool(partial_enabled),
+                    "min_slice_pct": float(min_slice_pct),
                     "max_slices": int(max_slices),
                 },
+                "price_source": price_source,
             }
-            if update_paper_config(payload):
-                st.success("Paper configuration updated")
-                st.experimental_rerun()
-            else:
-                st.error("Failed to update paper configuration")
+            try:
+                api_request("POST", "/api/paper/config", json=payload)
+                st.success("Paper configuration updated.")
+                get_paper_config.clear()
+            except ApiError as exc:
+                st.error(f"Update failed: {exc}")
 
     st.markdown("---")
+    st.subheader("Recent Versions")
+    try:
+        versions = list_config_versions(limit=5)
+    except ApiError as exc:
+        st.error(f"Could not load version history: {exc}")
+        versions = []
 
-    st.subheader("📘 Configuration Snapshot")
-    st.json(
-        {
-            "App Mode": current_mode,
-            "Shadow": shadow_enabled,
-            "Tracked Symbols": config.trading.symbols,
-            "Messaging": config.messaging.servers,
-            "Database": config.database.path,
-        }
+    if versions:
+        history_df = pd.DataFrame(versions)
+        history_df.rename(
+            columns={"version": "Version", "created_at": "Created"},
+            inplace=True,
+        )
+        st.table(history_df)
+    else:
+        st.caption("No previous versions recorded.")
+
+
+def _render_backtest_tab() -> None:
+    st.subheader("Run Historical Backtests")
+    default_start = date.today() - timedelta(days=60)
+    default_end = date.today()
+
+    with st.form("backtest_form"):
+        symbol = st.text_input("Symbol", value="BTCUSDT").strip().upper()
+        col_a, col_b = st.columns(2)
+        start_date = col_a.date_input("Start Date", value=default_start, max_value=date.today())
+        end_date = col_b.date_input("End Date", value=default_end, max_value=date.today())
+        submitted = st.form_submit_button("Launch Backtest")
+
+        if submitted:
+            if start_date > end_date:
+                st.warning("Start date must be before end date.")
+            elif not symbol:
+                st.warning("Symbol is required.")
+            else:
+                payload = {
+                    "symbol": symbol,
+                    "start": start_date.isoformat(),
+                    "end": end_date.isoformat(),
+                }
+                try:
+                    job = api_request("POST", "/api/backtests", json=payload)
+                    st.success(f"Queued backtest {job['job_id']} for {symbol}.")
+                    st.session_state["last_backtest_job"] = job["job_id"]
+                    get_backtests.clear()
+                except ApiError as exc:
+                    st.error(f"Unable to start backtest: {exc}")
+
+    st.markdown("---")
+    if st.button("Refresh Backtests"):
+        get_backtests.clear()
+        st.experimental_rerun()
+
+    try:
+        jobs = get_backtests()
+    except ApiError as exc:
+        st.error(f"Unable to load backtest history: {exc}")
+        return
+
+    if not jobs:
+        st.caption("No backtests have been launched yet.")
+        return
+
+    for job in jobs:
+        header = (
+            f"{job['symbol']} · {job['start']} → {job['end']} · "
+            f"Status: {job['status'].upper()}"
+        )
+        expanded = (
+            "last_backtest_job" in st.session_state
+            and job["job_id"] == st.session_state["last_backtest_job"]
+        )
+        with st.expander(header, expanded=expanded):
+            st.write(f"Job ID: `{job['job_id']}`")
+            st.write(f"Submitted: {job['submitted_at']}")
+            if job.get("started_at"):
+                st.write(f"Started: {job['started_at']}")
+            if job.get("completed_at"):
+                st.write(f"Completed: {job['completed_at']}")
+            if job.get("error"):
+                st.error(job["error"])
+            result = job.get("result")
+            if result:
+                metrics_row = st.columns(4)
+                metrics_row[0].metric("Total Trades", int(result.get("total_trades", 0)))
+                metrics_row[1].metric("Win Rate", f"{result.get('win_rate', 0):.1f}%")
+                metrics_row[2].metric("Total PnL", f"${result.get('total_pnl', 0):,.2f}")
+                metrics_row[3].metric(
+                    "Max Drawdown", f"{result.get('max_drawdown', 0):.1f}%"
+                )
+
+                st.write(
+                    f"Return: {result.get('return_percentage', 0):.1f}% · "
+                    f"Sharpe: {result.get('sharpe_ratio', 0):.2f} · "
+                    f"Profit Factor: {result.get('profit_factor', 0):.2f}"
+                )
+
+                equity = result.get("equity_curve", [])
+                if equity:
+                    equity_df = pd.DataFrame(equity)
+                    equity_df["timestamp"] = pd.to_datetime(equity_df["timestamp"])
+                    equity_df.set_index("timestamp", inplace=True)
+                    st.line_chart(equity_df[["equity"]], height=220)
+
+                trades_result = result.get("trades", [])
+                if trades_result:
+                    trades_df = pd.DataFrame(trades_result)
+                    trades_df["entry_time"] = pd.to_datetime(trades_df["entry_time"])
+                    trades_df["exit_time"] = pd.to_datetime(trades_df["exit_time"])
+                    st.dataframe(
+                        trades_df[
+                            [
+                                "entry_time",
+                                "exit_time",
+                                "direction",
+                                "size",
+                                "entry_price",
+                                "exit_price",
+                                "net_pnl",
+                                "reason",
+                            ]
+                        ],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+
+def main() -> None:
+    _style_app()
+
+    try:
+        mode_data = get_mode_data()
+    except ApiError as exc:
+        st.error(f"Unable to reach ops API: {exc}")
+        mode_data = {"mode": "unknown", "shadow": False}
+
+    _render_sidebar(mode_data)
+
+    st.title("Trading Control Center")
+    st.caption("Single-user operations console for monitoring, tuning, and backtesting.")
+
+    overview_tab, config_tab, backtest_tab = st.tabs(
+        ["Overview", "Configuration", "Backtesting"]
     )
+
+    with overview_tab:
+        _render_overview_tab(mode_data)
+    with config_tab:
+        _render_config_tab()
+    with backtest_tab:
+        _render_backtest_tab()
 
 
 if __name__ == "__main__":

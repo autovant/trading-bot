@@ -35,6 +35,8 @@ function Get-DefaultEnvLines {
         "DB_URL=sqlite+aiosqlite:///./dev.db",
         "API_PORT=8080",
         "UI_PORT=8501",
+        "OPS_API_URL=http://127.0.0.1:8080",
+        "REPLAY_URL=http://127.0.0.1:8085",
         "EXEC_PORT=8082",
         "FEED_PORT=8081",
         "RISK_PORT=8083",
@@ -172,7 +174,7 @@ function Load-Env {
         $key = $pair[0].Trim()
         $value = $pair[1].Trim().Trim('"').Trim("'")
         if ($key) {
-            $env:$key = $value
+            Set-Item -Path "env:$key" -Value $value
         }
     }
 }
@@ -308,7 +310,8 @@ function Start-ServiceProcess {
 
     $arguments = $Service.Arguments
     Write-Log "Starting $($Service.Name): $($Service.FilePath) $($arguments -join ' ')"
-    $process = Start-Process -FilePath $Service.FilePath -ArgumentList $arguments -WorkingDirectory $Service.WorkingDirectory -PassThru -RedirectStandardOutput $Service.LogPath -RedirectStandardError $Service.LogPath
+    $stdErrLog = "$($Service.LogPath).err"
+    $process = Start-Process -FilePath $Service.FilePath -ArgumentList $arguments -WorkingDirectory $Service.WorkingDirectory -PassThru -RedirectStandardOutput $Service.LogPath -RedirectStandardError $stdErrLog
     Set-Content -Path $Service.PidPath -Value $process.Id
 }
 
@@ -479,7 +482,8 @@ function Start-Nats {
 
     $arguments = @("-p", "4222", "--http_port", "8222")
     Write-Log "Starting NATS server"
-    $process = Start-Process -FilePath $NatsExe -ArgumentList $arguments -WorkingDirectory $NatsDir -PassThru -RedirectStandardOutput $NatsLog -RedirectStandardError $NatsLog
+    $stdErrLog = "$NatsLog.err"
+    $process = Start-Process -FilePath $NatsExe -ArgumentList $arguments -WorkingDirectory $NatsDir -PassThru -RedirectStandardOutput $NatsLog -RedirectStandardError $stdErrLog
     Set-Content -Path $NatsPidFile -Value $process.Id
     if (-not $env:NATS_URL) {
         $env:NATS_URL = "nats://127.0.0.1:4222"
