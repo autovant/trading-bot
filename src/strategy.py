@@ -14,51 +14,58 @@ from pydantic import BaseModel
 
 from .config import TradingBotConfig
 from .database import DatabaseManager, Order, Position, Trade
-from .exchange import ExchangeClient, OrderResponse, Side, OrderType
+from .exchange import ExchangeClient
 from .indicators import TechnicalIndicators
 from .messaging import MessagingClient
-from .paper_trader import MarketSnapshot, PaperBroker
+from .models import MarketSnapshot, OrderResponse, OrderType, Side, MarketRegime, TradingSetup, TradingSignal, ConfidenceScore
+from .paper_trader import PaperBroker
+from .orderbook_indicators import OrderBookIndicators
+# Import Dynamic Strategy components
+try:
+    from .dynamic_strategy import DynamicStrategyEngine, StrategyConfig
+except ImportError:
+    DynamicStrategyEngine = None
+    StrategyConfig = None
 
 logger = logging.getLogger(__name__)
 
 
-class MarketRegime(BaseModel):
-    """Market regime classification."""
+def db_row_to_strategy_config(strategy_row: Any) -> Optional[StrategyConfig]:
+    """
+    Convert a database Strategy object (or dict) to a StrategyConfig object.
+    
+    Args:
+        strategy_row: Strategy object from database or dictionary.
+        
+    Returns:
+        StrategyConfig object or None if validation fails.
+    """
+    try:
+        if not DynamicStrategyEngine or not StrategyConfig:
+            logger.warning("DynamicStrategyEngine not available, cannot convert strategy config.")
+            return None
 
-    regime: str  # 'bullish', 'bearish', 'neutral'
-    strength: float  # 0-1
-    confidence: float  # 0-1
+        # Handle Pydantic model from database.py
+        if hasattr(strategy_row, "config"):
+            config_dict = strategy_row.config
+            # Ensure name matches if present in row but not in config
+            if hasattr(strategy_row, "name") and "name" not in config_dict:
+                config_dict["name"] = strategy_row.name
+        elif isinstance(strategy_row, dict):
+            config_dict = strategy_row
+        else:
+            logger.error(f"Invalid strategy row type: {type(strategy_row)}")
+            return None
+
+        # Validate and create StrategyConfig
+        return StrategyConfig(**config_dict)
+
+    except Exception as e:
+        logger.error(f"Failed to convert DB row to StrategyConfig: {e}")
+        return None
 
 
-class TradingSetup(BaseModel):
-    """Trading setup classification."""
 
-    direction: str  # 'long', 'short', 'none'
-    quality: float  # 0-1
-    strength: float  # 0-1
-
-
-class TradingSignal(BaseModel):
-    """Trading signal with metadata."""
-
-    signal_type: str  # 'pullback', 'breakout', 'divergence'
-    direction: str  # 'long', 'short'
-    strength: float  # 0-1
-    confidence: float  # 0-1
-    entry_price: float
-    stop_loss: float
-    take_profit: float
-    timestamp: Optional[datetime] = None
-
-
-class ConfidenceScore(BaseModel):
-    """Confidence scoring breakdown."""
-
-    regime_score: float
-    setup_score: float
-    signal_score: float
-    penalty_score: float
-    total_score: float
 
 
 class TradingStrategy:
@@ -72,6 +79,8 @@ class TradingStrategy:
         messaging: Optional[MessagingClient] = None,
         paper_broker: Optional[PaperBroker] = None,
         run_id: str = "",
+        strategy_config: Optional[Any] = None, # Legacy single config
+        strategy_configs: Optional[List[Any]] = None, # List of configs
     ):
         self.config = config
         self.exchange = exchange
@@ -81,6 +90,18 @@ class TradingStrategy:
         self.run_id = run_id or datetime.utcnow().strftime("%Y%m%d%H%M%S")
         self.mode = self.config.app_mode
         self.indicators = TechnicalIndicators()
+
+        # Dynamic Strategy Engines
+        self.dynamic_engines: Dict[str, DynamicStrategyEngine] = {}
+        
+        if strategy_config and DynamicStrategyEngine:
+            logger.info(f"Initializing Dynamic Strategy Engine: {strategy_config.name}")
+            self.dynamic_engines[strategy_config.name] = DynamicStrategyEngine(strategy_config)
+            
+        if strategy_configs and DynamicStrategyEngine:
+            for cfg in strategy_configs:
+                logger.info(f"Initializing Dynamic Strategy Engine: {cfg.name}")
+                self.dynamic_engines[cfg.name] = DynamicStrategyEngine(cfg)
 
         # Strategy state
         self.market_data: Dict[str, Dict[str, pd.DataFrame]] = {}
@@ -171,7 +192,7 @@ class TradingStrategy:
                 signal_snapshot: Optional[MarketSnapshot] = None
 
                 # Fetch data for each timeframe
-                for tf_name, timeframe in self.config.data.timeframes.items():
+                for tf_name, timeframe in self.config.data.timeframes.model_dump().items():
                     lookback = self.config.data.lookback_periods[tf_name]
 
                     # Fetch OHLCV data
@@ -293,27 +314,91 @@ class TradingStrategy:
                 logger.warning(f"Incomplete signal data for {symbol}")
                 return
 
-            # 1. Regime Detection
-            regime = self._detect_regime(regime_data)
+            # Microstructure Analysis (Common for all strategies)
+            vwap_val = None
+            ob_metrics = {}
+            
+            if self.config.strategy.vwap.enabled:
+                if self.config.strategy.vwap.mode == "rolling":
+                    vwap_series = self.indicators.rolling_vwap(signal_data, self.config.strategy.vwap.rolling_window)
+                else:
+                    vwap_series = self.indicators.vwap(signal_data)
+                vwap_val = vwap_series.iloc[-1]
 
-            # 2. Setup Detection
-            setup = self._detect_setup(setup_data)
+            if self.config.strategy.orderbook.enabled:
+                orderbook = await self.exchange.get_order_book(symbol, limit=self.config.strategy.orderbook.depth)
+                if orderbook:
+                    ob_metrics["imbalance"] = OrderBookIndicators.compute_orderbook_imbalance(
+                        orderbook, self.config.strategy.orderbook.depth
+                    )
+                    spread, mid, _ = OrderBookIndicators.compute_spread_and_mid(orderbook)
+                    ob_metrics["spread"] = spread
+                    ob_metrics["mid_price"] = mid
+                    ob_metrics["walls"] = OrderBookIndicators.detect_liquidity_walls(
+                        orderbook, 
+                        self.config.strategy.orderbook.depth,
+                        self.config.strategy.orderbook.wall_multiplier
+                    )
 
-            # 3. Signal Generation
-            signals = self._generate_signals(signal_data)
+            # Strategy Execution
+            if self.dynamic_engines:
+                # Run all dynamic strategies
+                for name, engine in self.dynamic_engines.items():
+                    # 1. Regime
+                    regime = engine.detect_regime(regime_data)
+                    # 2. Setup
+                    setup = engine.detect_setup(setup_data)
+                    # 3. Signals
+                    signals = engine.generate_signals(signal_data)
+                    
+                    # 4. Filter
+                    # Note: Dynamic engine generate_signals already checks entry conditions.
+                    # But we might want to check regime/setup alignment if configured in the strategy?
+                    # The current DynamicStrategyEngine doesn't enforce regime/setup alignment in generate_signals.
+                    # It just returns signals if entry conditions are met.
+                    # We should probably enforce it here or add it to the engine.
+                    # For now, let's use the common _filter_signals logic but adapted?
+                    # Actually, _filter_signals uses the `regime` and `setup` objects.
+                    # So we can use it.
+                    
+                    valid_signals = self._filter_signals(signals, regime, setup)
+                    
+                    # 4.5 Microstructure
+                    valid_signals = self._apply_microstructure_filters(valid_signals, vwap_val, ob_metrics)
+                    
+                    # 5. Score and Execute
+                    for signal in valid_signals:
+                        confidence = engine.calculate_confidence(regime, setup, signal)
+                        threshold = engine.config.confidence_threshold
+                        
+                        if confidence.total_score >= threshold:
+                            logger.info(f"Strategy {name} triggered {signal.direction} signal for {symbol}")
+                            await self._execute_signal(symbol, signal, confidence, regime, vwap_val, ob_metrics)
+            
+            else:
+                # Legacy Hardcoded Strategy
+                # 1. Regime Detection
+                regime = self._detect_regime(regime_data)
 
-            # 4. Filter signals by regime and setup
-            valid_signals = self._filter_signals(signals, regime, setup)
+                # 2. Setup Detection
+                setup = self._detect_setup(setup_data)
 
-            # 5. Score and execute valid signals
-            for signal in valid_signals:
-                confidence = self._calculate_confidence(regime, setup, signal, symbol)
+                # 3. Signal Generation
+                signals = self._generate_signals(signal_data)
 
-                if (
-                    confidence.total_score
-                    >= self.config.strategy.confidence.min_threshold
-                ):
-                    await self._execute_signal(symbol, signal, confidence, regime)
+                # 4. Filter signals by regime and setup
+                valid_signals = self._filter_signals(signals, regime, setup)
+
+                # 4.5 Microstructure Analysis
+                valid_signals = self._apply_microstructure_filters(valid_signals, vwap_val, ob_metrics)
+
+                # 5. Score and execute valid signals
+                for signal in valid_signals:
+                    confidence = self._calculate_confidence(regime, setup, signal, symbol)
+                    threshold = self.config.strategy.confidence.min_threshold
+
+                    if confidence.total_score >= threshold:
+                        await self._execute_signal(symbol, signal, confidence, regime, vwap_val, ob_metrics)
 
         except Exception as e:
             logger.error(f"Error analyzing {symbol}: {e}")
@@ -431,6 +516,16 @@ class TradingStrategy:
             donchian_high, donchian_low = self.indicators.donchian_channels(
                 data, self.config.strategy.signals.donchian_period
             )
+            bb_upper, bb_middle, bb_lower = self.indicators.bollinger_bands(
+                data["close"],
+                self.config.strategy.signals.bollinger_period,
+                self.config.strategy.signals.bollinger_std_dev,
+            )
+            divergence = self.indicators.detect_divergence(
+                data["close"],
+                rsi,
+                self.config.strategy.signals.divergence_lookback,
+            )
 
             # Current values
             current_price = data["close"].iloc[-1]
@@ -438,6 +533,8 @@ class TradingStrategy:
             current_rsi = rsi.iloc[-1]
             current_high = donchian_high.iloc[-1]
             current_low = donchian_low.iloc[-1]
+            current_bb_upper = bb_upper.iloc[-1]
+            current_bb_lower = bb_lower.iloc[-1]
 
             # 1. Pullback Signals
             if (
@@ -507,6 +604,62 @@ class TradingStrategy:
                     )
                 )
 
+            # 3. Mean Reversion (Bollinger Bands)
+            if current_price <= current_bb_lower:
+                signals.append(
+                    TradingSignal(
+                        signal_type="mean_reversion",
+                        direction="long",
+                        strength=0.7,
+                        confidence=0.6,
+                        entry_price=current_price,
+                        stop_loss=current_price * 0.98,
+                        take_profit=current_bb_middle.iloc[-1],  # Target middle band
+                        timestamp=datetime.now(),
+                    )
+                )
+            elif current_price >= current_bb_upper:
+                signals.append(
+                    TradingSignal(
+                        signal_type="mean_reversion",
+                        direction="short",
+                        strength=0.7,
+                        confidence=0.6,
+                        entry_price=current_price,
+                        stop_loss=current_price * 1.02,
+                        take_profit=current_bb_middle.iloc[-1],
+                        timestamp=datetime.now(),
+                    )
+                )
+
+            # 4. Divergence Signals
+            if divergence.get("bullish"):
+                signals.append(
+                    TradingSignal(
+                        signal_type="divergence",
+                        direction="long",
+                        strength=0.85,
+                        confidence=0.75,
+                        entry_price=current_price,
+                        stop_loss=current_price * 0.98,
+                        take_profit=current_price * 1.05,
+                        timestamp=datetime.now(),
+                    )
+                )
+            elif divergence.get("bearish"):
+                signals.append(
+                    TradingSignal(
+                        signal_type="divergence",
+                        direction="short",
+                        strength=0.85,
+                        confidence=0.75,
+                        entry_price=current_price,
+                        stop_loss=current_price * 1.02,
+                        take_profit=current_price * 0.95,
+                        timestamp=datetime.now(),
+                    )
+                )
+
         except Exception as e:
             logger.error(f"Error generating signals: {e}")
 
@@ -535,6 +688,55 @@ class TradingStrategy:
                 valid_signals.append(signal)
 
         return valid_signals
+
+    def _apply_microstructure_filters(
+        self, 
+        signals: List[TradingSignal], 
+        vwap_val: Optional[float], 
+        ob_metrics: Dict[str, Any]
+    ) -> List[TradingSignal]:
+        """Filter signals based on VWAP and Order Book metrics."""
+        if not signals:
+            return []
+            
+        filtered_signals = []
+        
+        for signal in signals:
+            keep = True
+            
+            # VWAP Filter
+            if self.config.strategy.vwap.enabled and vwap_val is not None:
+                if signal.direction == "long" and self.config.strategy.vwap.require_price_above_vwap_for_longs:
+                    if signal.entry_price < vwap_val:
+                        keep = False
+                        logger.debug(f"Signal filtered by VWAP: {signal.entry_price:.2f} < {vwap_val:.2f}")
+                elif signal.direction == "short" and self.config.strategy.vwap.require_price_below_vwap_for_shorts:
+                    if signal.entry_price > vwap_val:
+                        keep = False
+                        logger.debug(f"Signal filtered by VWAP: {signal.entry_price:.2f} > {vwap_val:.2f}")
+
+            # Order Book Filter
+            if self.config.strategy.orderbook.enabled and self.config.strategy.orderbook.use_for_entry:
+                imbalance = ob_metrics.get("imbalance", 0.0)
+                threshold = self.config.strategy.orderbook.imbalance_threshold
+                
+                if signal.direction == "long":
+                    if imbalance < threshold: # Require positive imbalance for long?
+                        # User example: "orderbook_imbalance > vwap_long_min_imbalance"
+                        # My config has `imbalance_threshold`.
+                        # Let's assume we want imbalance > threshold for long
+                        # and imbalance < -threshold for short.
+                        keep = False
+                        logger.debug(f"Signal filtered by OBI: {imbalance:.2f} < {threshold}")
+                elif signal.direction == "short":
+                    if imbalance > -threshold:
+                        keep = False
+                        logger.debug(f"Signal filtered by OBI: {imbalance:.2f} > {-threshold}")
+
+            if keep:
+                filtered_signals.append(signal)
+                
+        return filtered_signals
 
     def _calculate_confidence(
         self,
@@ -616,6 +818,8 @@ class TradingStrategy:
         signal: TradingSignal,
         confidence: ConfidenceScore,
         regime: MarketRegime,
+        vwap_val: Optional[float] = None,
+        ob_metrics: Optional[Dict[str, Any]] = None,
     ):
         """Execute a trading signal with ladder entries and dual stops."""
         try:
@@ -659,6 +863,9 @@ class TradingStrategy:
                             "confidence_score": confidence.total_score,
                             "signal_type": signal.signal_type,
                             "regime": regime.regime,
+                            "vwap": vwap_val,
+                            "orderbook_imbalance": ob_metrics.get("imbalance") if ob_metrics else None,
+                            "spread": ob_metrics.get("spread") if ob_metrics else None,
                         },
                     },
                 )
@@ -674,12 +881,14 @@ class TradingStrategy:
 
             if order_response:
                 logger.info(
-                    "Placed order %s for %s: %s %.4f @ %.2f",
+                    "Placed order %s for %s: %s %.4f @ %.2f | VWAP: %s | OBI: %s",
                     order_response.order_id,
                     symbol,
                     side,
                     position_size,
                     signal.entry_price,
+                    f"{vwap_val:.2f}" if vwap_val else "N/A",
+                    f"{ob_metrics.get('imbalance', 0):.2f}" if ob_metrics else "N/A",
                 )
                 await self._set_stop_losses(symbol, side, signal, position_size)
                 await self.update_positions()

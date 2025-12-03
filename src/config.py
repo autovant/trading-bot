@@ -26,8 +26,23 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-APP_MODE = Literal["live", "paper", "replay"]
+APP_MODE = Literal["live", "paper", "replay", "backtest"]
 PRICE_SOURCE = Literal["live", "bars", "replay"]
+_SCRIPT_ONLY_ENV_KEYS = (
+    "NATS_URL",
+    "DB_URL",
+    "API_PORT",
+    "UI_PORT",
+    "OPS_API_URL",
+    "REPLAY_URL",
+    "EXEC_PORT",
+    "FEED_PORT",
+    "RISK_PORT",
+    "REPORTER_PORT",
+    "REPLAY_PORT",
+    "OPS_PORT",
+    "LOG_LEVEL",
+)
 
 
 def _resolve_required_path(
@@ -65,7 +80,7 @@ def _substitute_env_vars(data: Any) -> Any:
         return [_substitute_env_vars(item) for item in data]
     if isinstance(data, str) and data.startswith("${") and data.endswith("}"):
         env_name = data[2:-1]
-        return os.getenv(env_name, data)
+        return os.getenv(env_name, None)
     return data
 
 
@@ -76,8 +91,7 @@ class StrictModel(BaseModel):
 
 
 class ExchangeConfig(StrictModel):
-    """Exchange connectivity configuration."""
-
+    provider: Literal["bybit", "zoomex"] = "bybit"
     name: str = "bybit"
     api_key: Optional[str] = Field(default=None, description="API key for venue access")
     secret_key: Optional[str] = Field(
@@ -85,27 +99,86 @@ class ExchangeConfig(StrictModel):
     )
     passphrase: Optional[str] = Field(default=None, description="API passphrase")
     testnet: bool = True
-    base_url: str = "https://api-testnet.bybit.com"
+    base_url: Optional[str] = None
+
+
+class PerpsConfig(StrictModel):
+    enabled: bool = False
+    exchange: Literal["zoomex"] = "zoomex"
+    symbol: str = "SOLUSDT"
+    interval: str = "5"
+    leverage: int = Field(default=1, ge=1)
+    mode: Literal["oneway", "hedge"] = "oneway"
+    positionIdx: int = Field(default=0, ge=0, le=2)
+    riskPct: float = Field(default=0.005, ge=0, le=1)
+    stopLossPct: float = Field(default=0.01, ge=0, le=1)
+    takeProfitPct: float = Field(default=0.03, ge=0, le=1)
+    cashDeployCap: float = Field(default=0.20, ge=0, le=1)
+    triggerBy: Literal["LastPrice", "MarkPrice", "IndexPrice"] = "LastPrice"
+    useMultiTfAtrStrategy: bool = True
+    htfInterval: str = "60"
+    atrPeriod: int = Field(default=14, ge=1)
+    atrStopMultiple: float = Field(default=1.5, ge=0)
+    hardStopMinPct: float = Field(default=0.0075, ge=0)
+    tp1Multiple: float = Field(default=1.0, ge=0)
+    tp2Multiple: float = Field(default=2.5, ge=0)
+    maxBarsInTrade: int = Field(default=100, ge=1)
+    minAtrPct: float = Field(default=0.002, ge=0)
+    minAtrUsd: Optional[float] = Field(default=None, ge=0)
+    useRsiFilter: bool = True
+    rsiPeriod: int = Field(default=14, ge=1)
+    rsiMin: int = Field(default=40, ge=0, le=100)
+    rsiMax: int = Field(default=70, ge=0, le=100)
+    useVolumeFilter: bool = False
+    volumeLookback: int = Field(default=20, ge=1)
+    volumeSpikeMultiplier: float = Field(default=1.25, ge=0)
+    exitOnTrendFlip: bool = True
+    maxEmaDistanceAtr: float = Field(default=0.75, ge=0)
+    wickAtrBuffer: float = Field(default=0.35, ge=0)
+    atrRiskScaling: bool = True
+    atrRiskScalingThreshold: float = Field(default=0.02, ge=0)
+    atrRiskScalingFactor: float = Field(default=0.5, ge=0, le=1)
+    breakevenAfterTp1: bool = True
+    earlyExitOnCross: bool = False
+    useTestnet: bool = True
+    consecutiveLossLimit: Optional[int] = Field(default=None, ge=1)
+    maxMarginRatio: float = Field(default=0.8, ge=0, le=1)
+    maxRequestsPerSecond: int = Field(default=5, ge=1)
+    maxRequestsPerMinute: int = Field(default=60, ge=1)
+    stateFile: Optional[str] = "data/perps_state.json"
+    sessionMaxTrades: Optional[int] = Field(default=None, ge=1)
+    sessionMaxRuntimeMinutes: Optional[int] = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_mode(cls, values: "PerpsConfig") -> "PerpsConfig":
+        mode = values.mode
+        idx = values.positionIdx
+        if mode == "oneway" and idx != 0:
+            raise ValueError("positionIdx must be 0 in oneway mode")
+        if mode == "hedge" and idx not in (1, 2):
+            raise ValueError("positionIdx must be 1 or 2 in hedge mode")
+        if values.tp2Multiple < values.tp1Multiple:
+            raise ValueError("tp2Multiple must be >= tp1Multiple")
+        if values.rsiMin >= values.rsiMax:
+            raise ValueError("rsiMin must be less than rsiMax")
+        return values
+
 
 
 class TradingConfig(StrictModel):
-    """Core trading parameters."""
-
-    initial_capital: float = Field(default=1000.0, ge=0)
+    initial_capital: float = Field(default=10000.0, ge=0)
+    symbols: List[str] = Field(default_factory=lambda: ["BTCUSDT"])
     risk_per_trade: float = Field(default=0.006, ge=0, le=1)
-    max_positions: int = Field(default=3, ge=0)
+    max_positions: int = Field(default=3, ge=1)
     max_daily_risk: float = Field(default=0.05, ge=0, le=1)
     max_sector_exposure: float = Field(default=0.20, ge=0, le=1)
-    symbols: List[str] = Field(
-        default_factory=lambda: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-    )
 
     @field_validator("symbols")
-    @classmethod
     def _ensure_symbols(cls, value: List[str]) -> List[str]:
         if not value:
             raise ValueError("At least one trading symbol must be configured.")
         return value
+
 
 
 class RegimeConfig(StrictModel):
@@ -124,21 +197,8 @@ class SetupConfig(StrictModel):
     adx_threshold: float = Field(default=25.0, ge=0)
     atr_period: int = Field(default=14, ge=1)
     atr_multiplier: float = Field(default=2.0, ge=0)
-    weight: float = Field(default=0.30, ge=0, le=1)
-
-
-class SignalsConfig(StrictModel):
-    rsi_period: int = Field(default=14, ge=1)
-    rsi_oversold: float = Field(default=40.0, ge=0, le=100)
-    rsi_overbought: float = Field(default=60.0, ge=0, le=100)
-    donchian_period: int = Field(default=20, ge=1)
-    divergence_lookback: int = Field(default=3, ge=1)
-    weight: float = Field(default=0.35, ge=0, le=1)
-
-
-class ConfidenceConfig(StrictModel):
-    min_threshold: int = Field(default=50, ge=0, le=100)
-    full_size_threshold: int = Field(default=70, ge=0, le=100)
+    weight: float = Field(default=0.3, ge=0, le=1)
+    # Optional fields that might not be in yaml but are in code logic
     crisis_threshold: int = Field(default=80, ge=0, le=100)
     penalties: Dict[str, int] = Field(
         default_factory=lambda: {
@@ -148,12 +208,59 @@ class ConfidenceConfig(StrictModel):
         }
     )
 
+class VWAPConfig(StrictModel):
+    enabled: bool = False
+    mode: Literal["session", "rolling"] = "session"
+    rolling_window: int = Field(default=20, ge=1)
+    require_price_above_vwap_for_longs: bool = True
+    require_price_below_vwap_for_shorts: bool = True
+    
+class OrderBookConfig(StrictModel):
+    enabled: bool = False
+    depth: int = Field(default=5, ge=1)
+    imbalance_threshold: float = Field(default=0.2, ge=0, le=1)
+    wall_multiplier: float = Field(default=3.0, ge=1)
+    use_for_entry: bool = True
+    use_for_exit: bool = False
+
+class OrderBookRiskConfig(StrictModel):
+    enabled: bool = False
+    widen_sl_on_adverse_imbalance: bool = False
+    sl_widen_factor: float = Field(default=1.5, ge=1)
+    reduce_size_on_high_spread: bool = False
+    spread_threshold_bps: float = Field(default=5.0, ge=0)
+    size_reduction_factor: float = Field(default=0.5, ge=0, le=1)
+
+class ConfidenceConfig(StrictModel):
+    min_threshold: float = Field(default=70.0, ge=0, le=100)
+    crisis_threshold: float = Field(default=80.0, ge=0, le=100)
+    full_size_threshold: float = Field(default=70.0, ge=0, le=100)
+    regime_weight: float = Field(default=0.3, ge=0, le=1)
+    setup_weight: float = Field(default=0.3, ge=0, le=1)
+    signal_weight: float = Field(default=0.4, ge=0, le=1)
+    penalties: Dict[str, int] = Field(default_factory=dict)
+
+class SignalsConfig(StrictModel):
+    pullback_enabled: bool = True
+    breakout_enabled: bool = True
+    divergence_enabled: bool = False
+    # Fields from yaml
+    divergence_lookback: int = Field(default=3, ge=1)
+    donchian_period: int = Field(default=20, ge=1)
+    rsi_overbought: int = Field(default=60, ge=0, le=100)
+    rsi_oversold: int = Field(default=40, ge=0, le=100)
+    rsi_period: int = Field(default=14, ge=1)
+    weight: float = Field(default=0.35, ge=0, le=1)
 
 class StrategyConfig(StrictModel):
     regime: RegimeConfig = Field(default_factory=RegimeConfig)
     setup: SetupConfig = Field(default_factory=SetupConfig)
     signals: SignalsConfig = Field(default_factory=SignalsConfig)
     confidence: ConfidenceConfig = Field(default_factory=ConfidenceConfig)
+    vwap: VWAPConfig = Field(default_factory=VWAPConfig)
+    orderbook: OrderBookConfig = Field(default_factory=OrderBookConfig)
+    orderbook_risk: OrderBookRiskConfig = Field(default_factory=OrderBookRiskConfig)
+    active_strategies: List[str] = Field(default_factory=list)
 
 
 class LadderConfig(StrictModel):
@@ -358,12 +465,12 @@ class TradingBotConfig(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_file=".env",
-        env_nested_delimiter="__",
-        extra="forbid",
-        validate_assignment=True,
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="allow",
     )
 
-    app_mode: APP_MODE = Field(default="paper")
+    app_mode: APP_MODE = "paper"
     exchange: ExchangeConfig = Field(default_factory=ExchangeConfig)
     trading: TradingConfig = Field(default_factory=TradingConfig)
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
@@ -376,8 +483,24 @@ class TradingBotConfig(BaseSettings):
     messaging: MessagingConfig = Field(default_factory=MessagingConfig)
     paper: PaperConfig = Field(default_factory=PaperConfig)
     replay: ReplayConfig = Field(default_factory=ReplayConfig)
+    perps: PerpsConfig = Field(default_factory=PerpsConfig)
     shadow_paper: bool = False
     config_paths: ConfigPaths
+
+
+    # Local overrides used by the Windows deploy script (extra fields expected in .env).
+    nats_url: Optional[str] = None
+    db_url: Optional[str] = None
+    api_port: Optional[int] = None
+    ui_port: Optional[int] = None
+    ops_api_url: Optional[str] = None
+    exec_port: Optional[int] = None
+    feed_port: Optional[int] = None
+    risk_port: Optional[int] = None
+    reporter_port: Optional[int] = None
+    replay_port: Optional[int] = None
+    ops_port: Optional[int] = None
+    log_level: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate_live_credentials(self) -> "TradingBotConfig":
@@ -413,16 +536,10 @@ def load_config(config_path: Optional[str] = None) -> TradingBotConfig:
     venues_path = _resolve_required_path(
         "VENUES_CFG", "config/venues.yaml", "Venues configuration"
     )
-
     with strategy_path.open("r", encoding="utf-8") as handle:
         raw_data = yaml.safe_load(handle) or {}
 
     config_data = _substitute_env_vars(raw_data)
-
-    # Override app_mode from environment if supplied.
-    app_mode_override = os.getenv("APP_MODE")
-    if app_mode_override:
-        config_data["app_mode"] = app_mode_override
 
     config_data["config_paths"] = {
         "strategy": str(strategy_path),
@@ -430,7 +547,24 @@ def load_config(config_path: Optional[str] = None) -> TradingBotConfig:
         "venues": str(venues_path),
     }
 
-    return TradingBotConfig(**config_data)
+    app_mode_override = os.getenv("APP_MODE")
+    if app_mode_override:
+        config_data["app_mode"] = app_mode_override
+
+    script_env_values: Dict[str, Optional[str]] = {}
+    for key in _SCRIPT_ONLY_ENV_KEYS:
+        if key in os.environ:
+            script_env_values[key] = os.environ.pop(key)
+
+    try:
+        return TradingBotConfig(**config_data)
+    finally:
+        for key, value in script_env_values.items():
+            if value is None:
+                continue
+            os.environ[key] = value
+
+
 
 
 def get_config() -> TradingBotConfig:

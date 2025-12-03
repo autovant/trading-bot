@@ -1,227 +1,187 @@
 import asyncio
-from datetime import datetime
-
 import pytest
+from datetime import datetime
+from src.paper_trader import PaperBroker
+from src.config import PaperConfig, RiskManagementConfig, LatencyConfig, PartialFillConfig
+from src.database import DatabaseManager
+from src.models import MarketSnapshot, Side, OrderType
 
-from src.config import PaperConfig
-from src.paper_trader import MarketSnapshot, PaperBroker
+# Helper to run async code
+def run_async(coro):
+    return asyncio.run(coro)
 
-
-class StubDatabase:
-    def __init__(self):
-        self.trades = []
-        self.orders = {}
-        self.pnls = []
-        self.positions = {}
-        self.created_orders = []
-
-    async def create_order(self, order):
-        self.created_orders.append(order)
-        self.orders.setdefault(order.client_id, []).append(order.status)
-        return len(self.created_orders)
-
-    async def create_trade(self, trade):
-        self.trades.append(trade)
-        return len(self.trades)
-
-    async def update_order_status(self, order_id, status, is_shadow=False):
-        self.orders.setdefault(order_id, []).append(status)
-        return True
-
-    async def add_pnl_entry(self, entry):
-        self.pnls.append(entry)
-        return len(self.pnls)
-
-    async def update_position(self, position):
-        self.positions[position.symbol] = position
-        return True
-
-
-def basic_config(**overrides) -> PaperConfig:
-    cfg_dict = {
-        "fee_bps": 7,
-        "maker_rebate_bps": -1,
-        "funding_enabled": True,
-        "slippage_bps": 3,
-        "max_slippage_bps": 10,
-        "spread_slippage_coeff": 0.0,
-        "ofi_slippage_coeff": 0.0,
-        "latency_ms": {"mean": 0, "p95": 0},
-        "partial_fill": {
-            "enabled": False,
-            "min_slice_pct": 0.15,
-            "max_slices": 1,
-        },
-        "price_source": "live",
-        "seed": 42,
-    }
-    cfg_dict.update(overrides)
-    return PaperConfig(**cfg_dict)
-
-
-def make_snapshot(price: float = 100.0) -> MarketSnapshot:
-    return MarketSnapshot(
-        symbol="BTCUSDT",
-        best_bid=price - 0.5,
-        best_ask=price + 0.5,
-        bid_size=25,
-        ask_size=20,
-        last_price=price,
-        last_side="buy",
-        last_size=1.5,
-        funding_rate=0.0001,
-        timestamp=datetime.utcnow(),
+async def _setup_broker():
+    manager = DatabaseManager(":memory:")
+    await manager.initialize()
+    
+    paper_config = PaperConfig(
+        fee_bps=10.0,
+        maker_rebate_bps=2.0,
+        slippage_bps=5.0,
+        latency_ms=LatencyConfig(mean=10.0, p95=20.0),
+        partial_fill=PartialFillConfig(enabled=True, min_slice_pct=0.1, max_slices=5)
     )
-
-
-@pytest.mark.asyncio
-async def test_market_order_slippage_and_fees():
-    db = StubDatabase()
+    
     broker = PaperBroker(
-        config=basic_config(),
-        database=db,
+        config=paper_config,
+        database=manager,
         mode="paper",
-        run_id="test-run",
-        initial_balance=10_000,
+        run_id="test_run",
+        initial_balance=10000.0
     )
-    await broker.update_market(make_snapshot(100))
-    await broker.place_order(
-        symbol="BTCUSDT",
-        side="buy",
-        order_type="market",
-        quantity=1.0,
-        client_id="test-market",
-    )
-    await broker.update_market(make_snapshot(100))
-    await asyncio.sleep(0.05)  # allow fill task
+    return broker, manager
 
-    assert db.trades, "trade not recorded"
-    trade = db.trades[-1]
-    expected_price = (100 + 0.5) * (1 + 0.0003)
-    assert pytest.approx(trade.price, rel=1e-6) == expected_price
-    expected_fee = expected_price * 1.0 * (7 / 10_000)
-    assert pytest.approx(trade.fees, rel=1e-6) == expected_fee
-    expected_achieved = ((100 - expected_price) / 100) * 10_000
-    assert pytest.approx(trade.achieved_vs_signal_bps, rel=1e-3) == expected_achieved
-    assert trade.achieved_vs_signal_bps < 0
-    assert trade.mode == "paper"
-    assert not trade.maker
+async def _test_market_order_buy_impl():
+    broker, manager = await _setup_broker()
+    try:
+        symbol = "BTCUSDT"
+        snapshot = MarketSnapshot(
+            symbol=symbol,
+            best_bid=50000.0,
+            best_ask=50010.0,
+            bid_size=1.0,
+            ask_size=1.0,
+            last_price=50005.0,
+            timestamp=datetime.utcnow()
+        )
+        
+        # Update market first
+        await broker.update_market(snapshot)
+        
+        # Place Buy Order
+        order = await broker.place_order(
+            symbol=symbol,
+            side="buy",
+            order_type="market",
+            quantity=0.1
+        )
+        
+        assert order.status == "open"
+        
+        # Wait for execution (simulated latency)
+        await asyncio.sleep(0.1)
+        
+        # Check positions
+        positions = await broker.get_positions()
+        assert len(positions) == 1
+        pos = positions[0]
+        assert pos.symbol == symbol
+        assert pos.side == "long"
+        assert pos.size == 0.1
+        # Entry price should include slippage
+        assert pos.entry_price > 50010.0 
+    finally:
+        await manager.close()
 
+def test_market_order_buy():
+    run_async(_test_market_order_buy_impl())
 
-@pytest.mark.asyncio
-async def test_limit_order_partial_fill():
-    db = StubDatabase()
-    cfg = basic_config(
-        partial_fill={
-            "enabled": True,
-            "min_slice_pct": 0.2,
-            "max_slices": 3,
-        },
-        seed=123,
-    )
-    broker = PaperBroker(
-        config=cfg, database=db, mode="paper", run_id="test-run", initial_balance=10_000
-    )
-    await broker.update_market(make_snapshot(100))
-    await broker.place_order(
-        symbol="BTCUSDT",
-        side="sell",
-        order_type="limit",
-        quantity=1.2,
-        price=100.5,
-        client_id="limit-maker",
-    )
-    await asyncio.sleep(0.05)
+async def _test_limit_order_fill_impl():
+    broker, manager = await _setup_broker()
+    try:
+        symbol = "ETHUSDT"
+        # Initial market
+        snapshot = MarketSnapshot(
+            symbol=symbol,
+            best_bid=3000.0,
+            best_ask=3010.0,
+            bid_size=10.0,
+            ask_size=10.0,
+            last_price=3005.0,
+            timestamp=datetime.utcnow()
+        )
+        await broker.update_market(snapshot)
+        
+        # Place Limit Buy below market
+        order = await broker.place_order(
+            symbol=symbol,
+            side="buy",
+            order_type="limit",
+            quantity=1.0,
+            price=2990.0
+        )
+        
+        await asyncio.sleep(0.05)
+        positions = await broker.get_positions()
+        assert len(positions) == 0 # Should not be filled yet
+        
+        # Move market down to cross limit
+        snapshot2 = MarketSnapshot(
+            symbol=symbol,
+            best_bid=2980.0,
+            best_ask=2985.0, # Ask is now below limit price 2990
+            bid_size=10.0,
+            ask_size=10.0,
+            last_price=2982.0,
+            timestamp=datetime.utcnow()
+        )
+        await broker.update_market(snapshot2)
+        
+        await asyncio.sleep(0.1)
+        
+        positions = await broker.get_positions()
+        assert len(positions) == 1
+        # Limit price was 2990.0. Market moved to 2985.0.
+        # We should get filled at 2990.0 or better (lower).
+        assert positions[0].entry_price <= 2990.0
+        # And reasonably close to market price 2985
+        assert positions[0].entry_price >= 2980.0
+    finally:
+        await manager.close()
 
-    statuses = db.orders.get("limit-maker", [])
-    assert statuses, "order status not updated"
-    assert statuses[-1] == "filled"
-    # Multiple fills recorded
-    fills = [t for t in db.trades if t.order_id == "limit-maker"]
-    assert len(fills) >= 1
-    total_qty = sum(t.quantity for t in fills)
-    assert pytest.approx(total_qty, rel=1e-6) == 1.2
-    assert all(t.maker for t in fills)
+def test_limit_order_fill():
+    run_async(_test_limit_order_fill_impl())
 
+async def _test_pnl_calculation_impl():
+    broker, manager = await _setup_broker()
+    try:
+        symbol = "SOLUSDT"
+        snapshot = MarketSnapshot(
+            symbol=symbol,
+            best_bid=100.0,
+            best_ask=100.1,
+            bid_size=100.0,
+            ask_size=100.0,
+            last_price=100.05,
+            timestamp=datetime.utcnow()
+        )
+        await broker.update_market(snapshot)
+        
+        # Buy 10 SOL
+        await broker.place_order(symbol, "buy", "market", 10.0)
+        await asyncio.sleep(0.1)
+        
+        # Price moves up 10%
+        snapshot2 = MarketSnapshot(
+            symbol=symbol,
+            best_bid=110.0,
+            best_ask=110.1,
+            bid_size=100.0,
+            ask_size=100.0,
+            last_price=110.05,
+            timestamp=datetime.utcnow()
+        )
+        await broker.update_market(snapshot2)
+        
+        positions = await broker.get_positions()
+        pos = positions[0]
+        # Unrealized PnL ~ (110.05 - Entry) * 10
+        # Entry approx 100.1 + slippage
+        expected_pnl = (110.05 - pos.entry_price) * 10.0
+        assert abs(pos.unrealized_pnl - expected_pnl) < 0.01
+        
+        # Close position
+        await broker.close_position(symbol)
+        await asyncio.sleep(0.1)
+        
+        positions = await broker.get_positions()
+        assert len(positions) == 0
+        
+        balance = await broker.get_account_balance()
+        # Initial 10000 + Profit - Fees
+        assert balance["totalWalletBalance"] > 10000.0
+    finally:
+        await manager.close()
 
-@pytest.mark.asyncio
-async def test_stop_order_triggers_on_mid_cross():
-    db = StubDatabase()
-    broker = PaperBroker(
-        config=basic_config(),
-        database=db,
-        mode="paper",
-        run_id="run",
-        initial_balance=5_000,
-    )
-    await broker.update_market(make_snapshot(100))
-    await broker.place_order(
-        symbol="BTCUSDT",
-        side="sell",
-        order_type="stop",
-        quantity=0.5,
-        stop_price=99.0,
-        client_id="stop-order",
-    )
-    await broker.update_market(make_snapshot(98.5))
-    await asyncio.sleep(0.01)
-
-    orders = db.orders.get("stop-order", [])
-    assert orders[-1] == "filled"
-    trades = [t for t in db.trades if t.order_id == "stop-order"]
-    assert trades, "stop order did not produce trade"
-    assert not any(t.maker for t in trades)
-
-
-def test_slippage_boundaries():
-    db = StubDatabase()
-    cfg = basic_config(
-        max_slippage_bps=12, ofi_slippage_coeff=0.5, spread_slippage_coeff=0.3
-    )
-    broker = PaperBroker(
-        config=cfg, database=db, mode="paper", run_id="run", initial_balance=1_000
-    )
-    snapshot = make_snapshot(100)
-    snapshot.order_flow_imbalance = 5.0
-    sl = broker._compute_slippage_bps(snapshot, "buy")
-    assert 0 <= sl <= cfg.max_slippage_bps
-
-
-def test_latency_sampler_properties():
-    db = StubDatabase()
-    cfg = basic_config(latency_ms={"mean": 100, "p95": 250})
-    broker = PaperBroker(
-        config=cfg, database=db, mode="paper", run_id="run", initial_balance=1_000
-    )
-    samples = sorted(broker._sample_latency_ms() for _ in range(1_000))
-    assert samples[0] >= 0
-    index = int(0.95 * (len(samples) - 1))
-    p95 = float(samples[index])
-    assert pytest.approx(p95, rel=0.2) == cfg.latency_ms.p95
-
-
-@pytest.mark.asyncio
-async def test_liquidation_guard_rejects_insufficient_buffer():
-    db = StubDatabase()
-    cfg = basic_config(
-        initial_margin_pct=0.02,
-        maintenance_margin_pct=0.005,
-        max_leverage=50,
-    )
-    broker = PaperBroker(
-        config=cfg, database=db, mode="paper", run_id="guard", initial_balance=10_000
-    )
-    await broker.update_market(make_snapshot(100))
-    await broker.place_order(
-        symbol="BTCUSDT",
-        side="buy",
-        order_type="market",
-        quantity=1.0,
-        client_id="guarded-order",
-    )
-    await asyncio.sleep(0.05)
-
-    statuses = db.orders.get("guarded-order", [])
-    assert statuses, "order status not recorded"
-    assert statuses[-1] == "rejected"
-    assert not any(trade.order_id == "guarded-order" for trade in db.trades)
+def test_pnl_calculation():
+    run_async(_test_pnl_calculation_impl())

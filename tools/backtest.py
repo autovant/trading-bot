@@ -2,51 +2,84 @@
 Historical backtesting engine with realistic execution simulation.
 """
 
-import asyncio
 import argparse
+import asyncio
 import json
-from datetime import datetime
-from typing import Dict, List, Optional
-import pandas as pd
-import numpy as np
-import sys
-
-from src.config import get_config, TradingBotConfig
-from src.exchange import ExchangeClient
-from src.strategy import MarketRegime, TradingSetup, TradingSignal
-from src.indicators import TechnicalIndicators
 import logging
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import numpy as np
+import pandas as pd
+
+from src.config import TradingBotConfig, get_config, PaperConfig
+from src.exchange import ExchangeClient
+from src.indicators import TechnicalIndicators
+from src.strategy import MarketRegime, TradingSetup, TradingSignal
+from src.paper_trader import PaperBroker
+from src.database import DatabaseManager
+from src.models import MarketSnapshot, Side, OrderType
+
+try:
+    from src.dynamic_strategy import DynamicStrategyEngine, StrategyConfig
+except ImportError:
+    DynamicStrategyEngine = None
+    StrategyConfig = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+class VirtualClock:
+    def __init__(self):
+        self._current_time = datetime.utcnow()
+
+    def set_time(self, dt: datetime):
+        self._current_time = dt
+
+    def now(self) -> datetime:
+        return self._current_time
 
 class BacktestEngine:
-    """Historical backtesting engine."""
-
-    def __init__(self, config: TradingBotConfig):
+    def __init__(self, config: TradingBotConfig, strategy_config: Optional[StrategyConfig] = None):
         self.config = config
+        self.strategy_config = strategy_config
         self.indicators = TechnicalIndicators()
-
-        # Backtest state
+        
+        # Initialize dynamic engine if config is provided
+        self.dynamic_engine = None
+        if self.strategy_config and DynamicStrategyEngine:
+            self.dynamic_engine = DynamicStrategyEngine(self.strategy_config)
+            
         self.initial_balance = config.backtesting.initial_balance
-        self.current_balance = self.initial_balance
-        self.positions: Dict[str, Dict] = {}
-        self.trades: List[Dict] = []
-        self.equity_curve: List[Dict] = []
 
-        # Performance metrics
+        self.clock = VirtualClock()
+        self.database = DatabaseManager(":memory:")
+        
+        # Initialize PaperBroker for backtesting
+        # We use the config's paper settings but override mode to 'backtest'
+        self.broker = PaperBroker(
+            config=config.paper,
+            database=self.database,
+            mode="backtest",
+            run_id=f"backtest_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+            initial_balance=config.backtesting.initial_balance,
+            risk_config=config.risk_management,
+            time_provider=self.clock.now
+        )
+
+        self.equity_curve: List[Dict] = []
+        
+        # Performance metrics (will be calculated from DB)
         self.total_trades = 0
         self.winning_trades = 0
         self.losing_trades = 0
         self.total_pnl = 0.0
         self.max_drawdown = 0.0
-        self.peak_equity = self.initial_balance
+        self.peak_equity = config.backtesting.initial_balance
 
-        # Execution parameters
-        self.slippage = config.backtesting.slippage
-        self.commission = config.backtesting.commission
 
     async def run_backtest(self, symbol: str, start_date: str, end_date: str) -> Dict:
         """Run backtest for a symbol over date range."""
@@ -55,10 +88,14 @@ class BacktestEngine:
                 f"Starting backtest for {symbol} from {start_date} to {end_date}"
             )
 
+            # Initialize database
+            await self.database.initialize()
+
             # Initialize exchange client for data fetching
             exchange = ExchangeClient(
                 self.config.exchange,
-                app_mode="live",
+                app_mode="paper",
+                paper_broker=self.broker,
             )
             await exchange.initialize()
 
@@ -72,23 +109,27 @@ class BacktestEngine:
                 return {}
 
             # Run simulation
-            await self._simulate_trading(symbol, data)
+            await self._simulate_trading(symbol, data, start_date)
 
             # Calculate performance metrics
-            performance = self._calculate_performance()
+            performance = await self._calculate_performance()
 
             # Close exchange
             await exchange.close()
 
             logger.info(
-                f"Backtest completed. Total P&L: ${performance['total_pnl']:.2f}"
+                f"Backtest completed. Total P&L: ${performance.get('total_pnl', 0.0):.2f}"
             )
 
             return performance
 
         except Exception as e:
             logger.error(f"Backtest error: {e}")
+            import traceback
+            traceback.print_exc()
             return {}
+        finally:
+            await self.database.close()
 
     async def _fetch_historical_data(
         self, exchange: ExchangeClient, symbol: str, start_date: str, end_date: str
@@ -97,34 +138,54 @@ class BacktestEngine:
         data: Dict[str, pd.DataFrame] = {}
 
         try:
-            # Calculate required periods
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-            days_diff = (end_dt - start_dt).days
+            start_dt = pd.Timestamp(start_date).tz_localize("UTC")
+            end_dt = pd.Timestamp(end_date).tz_localize("UTC")
+            days_diff = max((end_dt - start_dt).days, 1)
 
-            # Fetch data for each timeframe
-            for tf_name, timeframe in self.config.data.timeframes.items():
-                logger.info(f"Fetching {timeframe} data for {symbol}...")
+            missing_timeframes: List[str] = []
+            for tf_name, timeframe in self.config.data.timeframes.model_dump().items():
+                logger.info("Fetching %s data for %s", timeframe, symbol)
 
-                # Calculate limit based on timeframe and date range
                 if timeframe == "1h":
                     limit = min(days_diff * 24 + 200, 1000)
                 elif timeframe == "4h":
                     limit = min(days_diff * 6 + 100, 1000)
-                elif timeframe == "1d":
+                elif timeframe.lower() in {"1d", "1day", "1daily"}:
                     limit = min(days_diff + 50, 1000)
                 else:
                     limit = 1000
 
                 df = await exchange.get_historical_data(symbol, timeframe, limit)
+                df = self._normalise_dataframe(df)
+                if df is None or df.empty:
+                    df = self._load_local_klines(symbol, timeframe)
 
-                if df is not None and not df.empty:
-                    # Filter by date range
-                    df = df[(df.index >= start_dt) & (df.index <= end_dt)]
-                    data[tf_name] = df
-                    logger.info(f"Loaded {len(df)} bars for {timeframe}")
-                else:
-                    logger.warning(f"No data for {timeframe}")
+                if df is None or df.empty:
+                    logger.warning("No data available for %s (%s)", tf_name, timeframe)
+                    missing_timeframes.append(tf_name)
+                    continue
+
+                # Include buffer for warmup (e.g. 30 days)
+                buffer_dt = start_dt - pd.Timedelta(days=250)
+                sliced = df[(df.index >= buffer_dt) & (df.index <= end_dt)]
+                if sliced.empty:
+                    logger.warning(
+                        "No observations between %s and %s for %s (%s)",
+                        buffer_dt,
+                        end_date,
+                        tf_name,
+                        timeframe,
+                    )
+                    missing_timeframes.append(tf_name)
+                    continue
+
+                data[tf_name] = sliced
+                logger.info("Loaded %s rows for %s", len(sliced), timeframe)
+
+            if missing_timeframes:
+                raise RuntimeError(
+                    f"Missing historical data for timeframes: {', '.join(missing_timeframes)}"
+                )
 
             return data
 
@@ -132,7 +193,102 @@ class BacktestEngine:
             logger.error(f"Error fetching historical data: {e}")
             return {}
 
-    async def _simulate_trading(self, symbol: str, data: Dict[str, pd.DataFrame]):
+    def _normalise_dataframe(
+        self, df: Optional[pd.DataFrame]
+    ) -> Optional[pd.DataFrame]:
+        if df is None or df.empty:
+            return None
+        frame = df.copy()
+        timestamp_col = None
+        for candidate in ("timestamp", "time", "datetime", "date"):
+            if candidate in frame.columns:
+                timestamp_col = candidate
+                break
+        if timestamp_col is None:
+            return None
+        frame[timestamp_col] = pd.to_datetime(
+            frame[timestamp_col], utc=True, errors="coerce"
+        )
+        frame.dropna(subset=[timestamp_col], inplace=True)
+        frame.set_index(timestamp_col, inplace=True)
+        frame.sort_index(inplace=True)
+        return frame
+
+    def _load_local_klines(
+        self, symbol: str, timeframe: str
+    ) -> Optional[pd.DataFrame]:
+        """Load historical data from local sample/replay files."""
+
+        def _strip_scheme(path_str: str) -> str:
+            for prefix in ("parquet://", "csv://"):
+                if path_str.startswith(prefix):
+                    return path_str[len(prefix) :]
+            return path_str
+
+        candidates: List[Path] = []
+        replay_source = (self.config.replay.source or "").strip()
+        if replay_source:
+            candidates.append(Path(_strip_scheme(replay_source)))
+
+        symbol_slug = symbol.lower()
+        timeframe_slug = timeframe.lower()
+        base_names = [
+            f"{symbol_slug}_{timeframe_slug}",
+            f"{symbol.upper()}_{timeframe}",
+            f"{symbol}_{timeframe_slug}",
+        ]
+        search_roots = [
+            Path("data") / "historical",
+            Path("data") / "history",
+            Path("data"),
+            Path("sample_data"),
+        ]
+
+        for root in search_roots:
+            for name in base_names:
+                candidates.append(root / f"{name}.parquet")
+                candidates.append(root / f"{name}.csv")
+
+        for path in candidates:
+            dataset = self._read_local_dataset(path, symbol)
+            if dataset is not None and not dataset.empty:
+                logger.info("Loaded %s bars from %s", len(dataset), path)
+                return dataset
+
+        logger.warning(
+            "Local dataset not found for %s %s (checked %s candidates)",
+            symbol,
+            timeframe,
+            len(candidates),
+        )
+        return None
+
+    def _read_local_dataset(
+        self, path: Path, symbol: str
+    ) -> Optional[pd.DataFrame]:
+        if not path.exists():
+            return None
+        try:
+            if path.suffix.lower() == ".parquet":
+                df = pd.read_parquet(path)
+            elif path.suffix.lower() in {".csv", ".txt"}:
+                df = pd.read_csv(path)
+            else:
+                return None
+        except Exception as exc:
+            logger.warning("Unable to read %s: %s", path, exc)
+            return None
+
+        df = self._normalise_dataframe(df)
+        if df is None or df.empty:
+            return None
+
+        if "symbol" in df.columns:
+            df = df[df["symbol"].str.upper() == symbol.upper()]
+
+        return df if not df.empty else None
+
+    async def _simulate_trading(self, symbol: str, data: Dict[str, pd.DataFrame], start_date_str: str):
         """Simulate trading strategy on historical data."""
         try:
             signal_data = data.get("signal")  # 1h data for simulation
@@ -146,6 +302,13 @@ class BacktestEngine:
             # Simulate each time period
             for i in range(max(200, len(signal_data) // 10), len(signal_data)):
                 current_time = signal_data.index[i]
+                self.clock.set_time(current_time)
+                
+                # Check if we are within the requested backtest window
+                # (Data includes warmup buffer)
+                start_dt_limit = pd.Timestamp(start_date_str).tz_localize("UTC")
+                if current_time < start_dt_limit:
+                    continue
 
                 # Get data up to current time
                 current_data: Dict[str, pd.DataFrame] = {
@@ -166,24 +329,61 @@ class BacktestEngine:
                 if any(d.empty or len(d) < 50 for d in current_data.values()):
                     continue
 
-                # Analyze current market conditions
-                await self._analyze_market(symbol, current_data, current_time)
+                # OHLC Interpolation for PaperBroker
+                # We feed Open, then High/Low, then Close to ensure stops/limits are triggered
+                row = signal_data.iloc[i]
+                open_p = row.get("open", row["close"])
+                high_p = row.get("high", row["close"])
+                low_p = row.get("low", row["close"])
+                close_p = row["close"]
+                vol = row.get("volume", 0)
 
-                # Update positions
-                self._update_positions(symbol, signal_data.iloc[i])
+                # Determine path: O -> L -> H -> C (Green) or O -> H -> L -> C (Red)
+                # This is a heuristic.
+                is_green = close_p >= open_p
+                path = [open_p]
+                if is_green:
+                    path.extend([low_p, high_p])
+                else:
+                    path.extend([high_p, low_p])
+                path.append(close_p)
+
+                # Feed snapshots
+                for price in path:
+                    snapshot = MarketSnapshot(
+                        symbol=symbol,
+                        best_bid=price - 0.01, # Tight spread approximation
+                        best_ask=price + 0.01,
+                        bid_size=vol / 4,
+                        ask_size=vol / 4,
+                        last_price=price,
+                        timestamp=current_time
+                    )
+                    await self.broker.update_market(snapshot)
+                    # Allow broker to process fills
+                    await asyncio.sleep(0)
+
+                # Analyze market and generate signals (at Close)
+                await self._analyze_market(symbol, current_data, current_time)
+                
+                # Allow broker to process any new orders
+                await asyncio.sleep(0)
 
                 # Record equity
-                self._record_equity(current_time)
+                await self._record_equity(current_time)
 
                 # Progress logging
                 if i % 100 == 0:
                     progress = (i / len(signal_data)) * 100
+                    balance = (await self.broker.get_account_balance())["totalWalletBalance"]
                     logger.info(
-                        f"Progress: {progress:.1f}% - Balance: ${self.current_balance:.2f}"
+                        f"Progress: {progress:.1f}% - Balance: ${balance:.2f}"
                     )
 
         except Exception as e:
             logger.error(f"Error in trading simulation: {e}")
+            import traceback
+            traceback.print_exc()
 
     async def _analyze_market(
         self, symbol: str, data: Dict[str, pd.DataFrame], current_time: datetime
@@ -191,25 +391,42 @@ class BacktestEngine:
         """Analyze market conditions and generate signals."""
         try:
             # 1. Regime Detection
-            regime = self._detect_regime(data["regime"])
+            if self.dynamic_engine:
+                regime = self.dynamic_engine.detect_regime(data["regime"])
+            else:
+                regime = self._detect_regime(data["regime"])
 
             # 2. Setup Detection
-            setup = self._detect_setup(data["setup"])
+            if self.dynamic_engine:
+                setup = self.dynamic_engine.detect_setup(data["setup"])
+            else:
+                setup = self._detect_setup(data["setup"])
 
             # 3. Signal Generation
-            signals = self._generate_signals(data["signal"])
+            if self.dynamic_engine:
+                signals = self.dynamic_engine.generate_signals(data["signal"])
+            else:
+                signals = self._generate_signals(data["signal"])
 
             # 4. Filter and score signals
             if regime and setup and signals:
+                # Note: Dynamic engine might handle filtering differently, but we'll stick to the flow
                 valid_signals = self._filter_signals(signals, regime, setup)
 
                 for signal in valid_signals:
-                    confidence = self._calculate_confidence(regime, setup, signal)
-
-                    if confidence >= self.config.strategy.confidence.min_threshold:
-                        await self._execute_signal(
-                            symbol, signal, confidence, current_time
-                        )
+                    if self.dynamic_engine:
+                        confidence = self.dynamic_engine.calculate_confidence(regime, setup, signal)
+                        threshold = self.dynamic_engine.config.confidence_threshold
+                        if confidence.total_score >= threshold:
+                             await self._execute_signal(
+                                symbol, signal, confidence.total_score, current_time
+                            )
+                    else:
+                        confidence = self._calculate_confidence(regime, setup, signal)
+                        if confidence >= self.config.strategy.confidence.min_threshold:
+                            await self._execute_signal(
+                                symbol, signal, confidence, current_time
+                            )
 
         except Exception as e:
             logger.error(f"Error analyzing market: {e}")
@@ -415,16 +632,22 @@ class BacktestEngine:
     ):
         """Execute trading signal in backtest."""
         try:
+            # Check current positions
+            positions = await self.broker.get_positions()
+            
             # Check if we can take new positions
-            if len(self.positions) >= self.config.trading.max_positions:
+            if len(positions) >= self.config.trading.max_positions:
                 return
 
             # Check if already have position in this symbol
-            if symbol in self.positions:
+            if any(p.symbol == symbol for p in positions):
                 return
 
+            # Get current balance
+            balance = (await self.broker.get_account_balance())["totalWalletBalance"]
+
             # Calculate position size
-            risk_amount = self.current_balance * self.config.trading.risk_per_trade
+            risk_amount = balance * self.config.trading.risk_per_trade
             price_diff = abs(signal.entry_price - signal.stop_loss)
 
             if price_diff <= 0:
@@ -436,135 +659,71 @@ class BacktestEngine:
             if confidence < self.config.strategy.confidence.full_size_threshold:
                 position_size *= 0.7
 
-            # Apply slippage
-            entry_price = signal.entry_price * (
-                1 + self.slippage if signal.direction == "long" else 1 - self.slippage
+            # Convert direction
+            side = "buy" if signal.direction == "long" else "sell"
+            
+            # Place Entry Order
+            await self.broker.place_order(
+                symbol=symbol,
+                side=side,
+                order_type="market",
+                quantity=position_size,
+                client_id=f"entry-{timestamp.timestamp()}"
+            )
+            
+            # Place Stop Loss Order
+            stop_side = "sell" if side == "buy" else "buy"
+            await self.broker.place_order(
+                symbol=symbol,
+                side=stop_side,
+                order_type="stop_market",
+                quantity=position_size,
+                stop_price=signal.stop_loss,
+                reduce_only=True,
+                client_id=f"stop-{timestamp.timestamp()}"
+            )
+            
+            # Place Take Profit Order (Limit)
+            await self.broker.place_order(
+                symbol=symbol,
+                side=stop_side,
+                order_type="limit",
+                quantity=position_size,
+                price=signal.take_profit,
+                reduce_only=True,
+                client_id=f"tp-{timestamp.timestamp()}"
             )
 
-            # Calculate commission
-            commission = position_size * entry_price * self.commission
-
-            # Create position
-            self.positions[symbol] = {
-                "direction": signal.direction,
-                "size": position_size,
-                "entry_price": entry_price,
-                "stop_loss": signal.stop_loss,
-                "take_profit": signal.take_profit,
-                "entry_time": timestamp,
-                "commission": commission,
-            }
-
-            # Update balance
-            self.current_balance -= commission
-
             logger.info(
-                f"Opened {signal.direction} position in {symbol}: {position_size:.4f} @ ${entry_price:.2f}"
+                f"Placed {side} order for {symbol}: {position_size:.4f} @ Market (SL: {signal.stop_loss}, TP: {signal.take_profit})"
             )
 
         except Exception as e:
             logger.error(f"Error executing signal: {e}")
+            import traceback
+            traceback.print_exc()
 
-    def _update_positions(self, symbol: str, current_bar: pd.Series):
-        """Update positions based on current market data."""
-        if symbol not in self.positions:
-            return
 
-        position = self.positions[symbol]
-        current_price = current_bar["close"]
 
-        # Check stop loss
-        if (
-            position["direction"] == "long" and current_price <= position["stop_loss"]
-        ) or (
-            position["direction"] == "short" and current_price >= position["stop_loss"]
-        ):
-
-            self._close_position(symbol, current_price, "stop_loss")
-            return
-
-        # Check take profit
-        if (
-            position["direction"] == "long" and current_price >= position["take_profit"]
-        ) or (
-            position["direction"] == "short"
-            and current_price <= position["take_profit"]
-        ):
-
-            self._close_position(symbol, current_price, "take_profit")
-            return
-
-    def _close_position(self, symbol: str, exit_price: float, reason: str):
-        """Close a position."""
-        if symbol not in self.positions:
-            return
-
-        position = self.positions[symbol]
-
-        # Apply slippage
-        exit_price = exit_price * (
-            1 - self.slippage if position["direction"] == "long" else 1 + self.slippage
-        )
-
-        # Calculate P&L
-        if position["direction"] == "long":
-            pnl = (exit_price - position["entry_price"]) * position["size"]
-        else:
-            pnl = (position["entry_price"] - exit_price) * position["size"]
-
-        # Calculate commission
-        commission = position["size"] * exit_price * self.commission
-        net_pnl = pnl - position["commission"] - commission
-
-        # Update balance
-        self.current_balance += net_pnl
-
-        # Record trade
-        trade = {
-            "symbol": symbol,
-            "direction": position["direction"],
-            "size": position["size"],
-            "entry_price": position["entry_price"],
-            "exit_price": exit_price,
-            "entry_time": position["entry_time"],
-            "exit_time": datetime.now(),
-            "pnl": pnl,
-            "commission": position["commission"] + commission,
-            "net_pnl": net_pnl,
-            "reason": reason,
-        }
-
-        self.trades.append(trade)
-
-        # Update statistics
-        self.total_trades += 1
-        self.total_pnl += net_pnl
-
-        if net_pnl > 0:
-            self.winning_trades += 1
-        else:
-            self.losing_trades += 1
-
-        # Remove position
-        del self.positions[symbol]
-
-        logger.info(
-            f"Closed {position['direction']} position in {symbol}: P&L ${net_pnl:.2f} ({reason})"
-        )
-
-    def _record_equity(self, timestamp: datetime):
+    async def _record_equity(self, timestamp: datetime):
         """Record current equity."""
-        # Calculate unrealized P&L
-        unrealized_pnl = 0.0
-        # Note: In a real backtest, you'd calculate unrealized P&L for open positions
-
-        total_equity = self.current_balance + unrealized_pnl
+        balance_info = await self.broker.get_account_balance()
+        balance = balance_info["totalWalletBalance"]
+        
+        # Get unrealized PnL from positions
+        positions = await self.broker.get_positions()
+        unrealized_pnl = sum(p.unrealized_pnl for p in positions)
+        
+        total_equity = balance + unrealized_pnl
 
         # Update peak equity and drawdown
         if total_equity > self.peak_equity:
             self.peak_equity = total_equity
 
-        current_drawdown = (self.peak_equity - total_equity) / self.peak_equity
+        current_drawdown = 0.0
+        if self.peak_equity > 0:
+            current_drawdown = (self.peak_equity - total_equity) / self.peak_equity
+        
         if current_drawdown > self.max_drawdown:
             self.max_drawdown = current_drawdown
 
@@ -572,14 +731,43 @@ class BacktestEngine:
         self.equity_curve.append(
             {
                 "timestamp": timestamp,
-                "balance": self.current_balance,
+                "balance": balance,
                 "equity": total_equity,
                 "drawdown": current_drawdown,
             }
         )
 
-    def _calculate_performance(self) -> Dict:
+    async def _calculate_performance(self) -> Dict:
         """Calculate performance metrics."""
+        
+        # Fetch trades from DB
+        trades_models = await self.database.get_trades(run_id=self.broker.run_id)
+        
+        # Convert to dicts for consistency with legacy format
+        trades = []
+        for t in trades_models:
+            trade_dict = t.model_dump()
+            # Ensure timestamps are strings
+            if isinstance(trade_dict.get("timestamp"), datetime):
+                trade_dict["timestamp"] = trade_dict["timestamp"].isoformat()
+            
+            # Calculate net_pnl
+            trade_dict["net_pnl"] = (
+                trade_dict.get("realized_pnl", 0.0)
+                - trade_dict.get("commission", 0.0)
+                - trade_dict.get("fees", 0.0)
+                - trade_dict.get("funding", 0.0)
+            )
+            trades.append(trade_dict)
+
+        self.total_trades = len(trades)
+        self.winning_trades = sum(1 for t in trades if t["net_pnl"] > 0)
+        self.losing_trades = sum(1 for t in trades if t["net_pnl"] <= 0)
+        self.total_pnl = sum(t["net_pnl"] for t in trades)
+        
+        balance_info = await self.broker.get_account_balance()
+        current_balance = balance_info["totalWalletBalance"]
+
         if self.total_trades == 0:
             return {
                 "total_trades": 0,
@@ -590,6 +778,8 @@ class BacktestEngine:
                 "profit_factor": 0.0,
                 "max_drawdown": 0.0,
                 "sharpe_ratio": 0.0,
+                "final_balance": current_balance,
+                "return_percentage": 0.0,
                 "trades": [],
                 "equity_curve": [],
             }
@@ -599,10 +789,10 @@ class BacktestEngine:
 
         # Profit factor
         gross_profit = sum(
-            trade["net_pnl"] for trade in self.trades if trade["net_pnl"] > 0
+            t["net_pnl"] for t in trades if t["net_pnl"] > 0
         )
         gross_loss = abs(
-            sum(trade["net_pnl"] for trade in self.trades if trade["net_pnl"] < 0)
+            sum(t["net_pnl"] for t in trades if t["net_pnl"] < 0)
         )
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
 
@@ -619,7 +809,7 @@ class BacktestEngine:
                 avg_return = np.mean(returns)
                 std_return = np.std(returns)
                 sharpe_ratio = (
-                    (avg_return / std_return) * np.sqrt(252) if std_return > 0 else 0.0
+                    (avg_return / std_return) * np.sqrt(252 * 24) if std_return > 0 else 0.0 # Assuming hourly bars
                 )
             else:
                 sharpe_ratio = 0.0
@@ -635,12 +825,12 @@ class BacktestEngine:
             "profit_factor": profit_factor,
             "max_drawdown": self.max_drawdown * 100,
             "sharpe_ratio": sharpe_ratio,
-            "final_balance": self.current_balance,
+            "final_balance": current_balance,
             "return_percentage": (
-                (self.current_balance - self.initial_balance) / self.initial_balance
+                (current_balance - self.initial_balance) / self.initial_balance
             )
             * 100,
-            "trades": self.trades,
+            "trades": trades,
             "equity_curve": self.equity_curve,
         }
 
@@ -658,9 +848,39 @@ async def main():
     try:
         # Load configuration
         config = get_config()
+        
+        print(f"DynamicStrategyEngine available: {DynamicStrategyEngine is not None}")
+        print(f"DB Path: {config.database.path}")
+
+        strategy_config = None
+        # Try to load active strategy from real DB
+        try:
+            db_path = config.database.path
+            if Path(db_path).exists():
+                print(f"DB file exists at {db_path}")
+                # We need to import DatabaseManager here or use the one imported
+                # It is already imported.
+                db = DatabaseManager(db_path)
+                await db.initialize()
+                strategies = await db.list_strategies()
+                print(f"Found {len(strategies)} strategies in DB")
+                active = [s for s in strategies if s.is_active]
+                print(f"Found {len(active)} active strategies")
+                if active:
+                    # Convert DB strategy to StrategyConfig
+                    from src.strategy import db_row_to_strategy_config
+                    strategy_config = db_row_to_strategy_config(active[0])
+                    print(f"Loaded active strategy: {strategy_config.name}")
+                await db.close()
+            else:
+                print(f"DB file does not exist at {db_path}")
+        except Exception as e:
+            print(f"Failed to load strategy from DB: {e}")
+            import traceback
+            traceback.print_exc()
 
         # Create backtest engine
-        engine = BacktestEngine(config)
+        engine = BacktestEngine(config, strategy_config)
 
         # Run backtest
         results = await engine.run_backtest(args.symbol, args.start, args.end)

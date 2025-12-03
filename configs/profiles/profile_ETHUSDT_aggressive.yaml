@@ -1,0 +1,24 @@
+# Auto-generated Aggressive profile for ETHUSDT
+perps:
+  enabled: true
+  symbol: ETHUSDT
+  interval: '5'
+  useMultiTfAtrStrategy: true
+  htfInterval: '60'
+  riskPct: 0.004
+  atrPeriod: 14
+  atrStopMultiple: 1.5
+  hardStopMinPct: 0.008
+  tp1Multiple: 1.0
+  tp2Multiple: 2.0
+  minAtrPct: 0.002
+  maxEmaDistanceAtr: 0.75
+  maxBarsInTrade: 100
+  atrRiskScaling: true
+  atrRiskScalingThreshold: 0.015
+  atrRiskScalingFactor: 0.5
+  breakevenAfterTp1: true
+  exitOnTrendFlip: true
+  useRsiFilter: true
+  rsiMin: 40
+  rsiMax: 70

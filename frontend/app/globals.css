@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #050505;
+  --foreground: #e0e0e0;
+  
+  --card-bg: #0a0a0a;
+  --card-border: #1f1f1f;
+  
+  --accent-primary: #00ff9d;
+  --accent-secondary: #00b8ff;
+  --accent-danger: #ff3366;
+  
+  --grid-line: #1a1a1a;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: 'Inter', monospace; /* Prefer monospace for data */
+}
+
+@layer utilities {
+  .text-glow {
+    text-shadow: 0 0 10px rgba(0, 255, 157, 0.5);
+  }
+  .border-glow {
+    box-shadow: 0 0 10px rgba(0, 255, 157, 0.2);
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--background);
+}
+::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}

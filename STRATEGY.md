@@ -176,7 +176,25 @@ Position Size = (Account Balance × Risk %) / (Entry Price - Stop Loss)
 - Consider market impact for position sizes
 - Use tick-by-tick data for accuracy
 
-## Future Enhancements
+## Dynamic Strategy Engine
+ 
+ The bot now features a **Dynamic Strategy Engine** that allows for the creation and execution of strategies defined via JSON configuration. This enables a "No-Code" approach to strategy development.
+ 
+ ### Capabilities
+ 
+ - **Configurable Components**: Regime, Setup, and Signals can be defined using any supported indicator.
+ - **Logic Builder**: Define conditions using operators (`>`, `<`, `==`, etc.) and thresholds.
+ - **Multi-Timeframe**: Mix and match timeframes for different components (e.g., Daily Regime, 4H Setup, 1H Signal).
+ - **Risk Management**: Configure Stop Loss (ATR, Percent) and Take Profit (Risk:Reward, Percent) dynamically.
+ 
+ ### Strategy Studio
+ 
+ The **Strategy Studio** (`frontend/components/StrategyBuilder.tsx`) provides a visual interface to interact with the Dynamic Strategy Engine. Users can:
+ - Build strategies using a drag-and-drop style interface.
+ - Save and load strategies.
+ - Run backtests immediately and visualize results.
+ 
+ ## Future Enhancements
 
 1. Machine learning signal filtering
 2. Multi-asset correlation analysis

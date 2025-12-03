@@ -22,46 +22,9 @@ from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tupl
 from .config import PaperConfig, RiskManagementConfig
 from .database import DatabaseManager, Order, PnLEntry, Position, Trade
 from .metrics import AVERAGE_SLIPPAGE_BPS, MAKER_RATIO, SIGNAL_ACK_LATENCY
-
-Mode = Literal["live", "paper", "replay"]
-Side = Literal["buy", "sell"]
-OrderType = Literal["market", "limit", "stop", "stop_market"]
+from .models import MarketSnapshot, Mode, OrderType, Side
 
 
-@dataclass
-class MarketSnapshot:
-    """Current observable market state used for simulation inputs."""
-
-    symbol: str
-    best_bid: float
-    best_ask: float
-    bid_size: float
-    ask_size: float
-    last_price: float
-    last_side: Optional[Side] = None
-    last_size: float = 0.0
-    funding_rate: float = 0.0  # hourly funding rate (positive -> longs pay)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-    order_flow_imbalance: float = 0.0  # positive = buy pressure, negative = sell
-
-    @property
-    def mid_price(self) -> float:
-        if self.best_bid > 0 and self.best_ask > 0:
-            return (self.best_bid + self.best_ask) / 2.0
-        return self.last_price
-
-    @property
-    def spread(self) -> float:
-        if self.best_bid > 0 and self.best_ask > 0:
-            return max(self.best_ask - self.best_bid, 0.0)
-        return 0.0
-
-    @property
-    def spread_bps(self) -> float:
-        mid = self.mid_price
-        if mid <= 0:
-            return 0.0
-        return (self.spread / mid) * 10_000
 
 
 @dataclass
@@ -112,6 +75,7 @@ class PaperBroker:
         execution_listener: Optional[
             Callable[[Dict[str, Any]], Awaitable[None]]
         ] = None,
+        time_provider: Callable[[], datetime] = datetime.utcnow,
     ):
         self.config = config
         self.database = database
@@ -119,6 +83,7 @@ class PaperBroker:
         self.run_id = run_id
         self._balance = initial_balance
         self._execution_listener = execution_listener
+        self._time_provider = time_provider
 
         self._lock = asyncio.Lock()
         self._market_state: Dict[str, MarketSnapshot] = {}
@@ -144,6 +109,12 @@ class PaperBroker:
         self._taker_fills = 0
         self._maker_fills_by_symbol: Dict[str, int] = defaultdict(int)
         self._taker_fills_by_symbol: Dict[str, int] = defaultdict(int)
+
+    async def _sleep(self, delay_ms: float) -> None:
+        """Sleep wrapper to allow skipping in backtest mode."""
+        if self.mode == "backtest":
+            return
+        await asyncio.sleep(delay_ms / 1000.0)
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -301,7 +272,16 @@ class PaperBroker:
                     size=abs(state.size),
                     entry_price=state.avg_price,
                     mark_price=self._market_state.get(
-                        symbol, MarketSnapshot(symbol, 0, 0, 0, 0, 0)
+                        symbol, 
+                        MarketSnapshot(
+                            symbol=symbol, 
+                            best_bid=0, 
+                            best_ask=0, 
+                            bid_size=0, 
+                            ask_size=0, 
+                            last_price=0,
+                            timestamp=self._time_provider()
+                        )
                     ).mid_price,
                     unrealized_pnl=state.unrealized_pnl,
                     percentage=self._position_return_pct(state),
@@ -407,14 +387,7 @@ class PaperBroker:
                 ]
 
             # Resting on the book as maker
-            slice_plan = self._build_partial_fill_plan(order.quantity)
-            fills: List[Tuple[float, float, float, bool, float]] = []
-            base_price = order.price
-            for index, qty in enumerate(slice_plan):
-                jitter = 1.0 + index / max(len(slice_plan), 1)
-                delay = self._sample_latency_ms() * jitter
-                fills.append((delay, qty, base_price, True, 0.0))
-            return fills
+            return []
 
         return []
 
@@ -506,7 +479,7 @@ class PaperBroker:
         delay_ms: float,
         reduce_only: bool,
     ) -> None:
-        await asyncio.sleep(delay_ms / 1000.0)
+        await self._sleep(delay_ms)
 
         fee_rate_bps = self.config.maker_rebate_bps if maker else self.config.fee_bps
         fee_amount = fill_price * fill_qty * fee_rate_bps / 10_000
@@ -564,7 +537,7 @@ class PaperBroker:
                     maker=maker,
                     mode=self.mode,
                     run_id=self.run_id,
-                    timestamp=datetime.utcnow(),
+                    timestamp=self._time_provider(),
                     is_shadow=order.is_shadow,
                 )
                 await self.database.create_trade(trade)
@@ -636,7 +609,7 @@ class PaperBroker:
                     "ack_latency_ms": delay_ms,
                     "mode": self.mode,
                     "run_id": self.run_id,
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": self._time_provider().isoformat(),
                     "is_shadow": order.is_shadow,
                     "error": "",
                     "reduce_only": reduce_only,
@@ -673,7 +646,7 @@ class PaperBroker:
                     "ack_latency_ms": delay_ms,
                     "mode": self.mode,
                     "run_id": self.run_id,
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": self._time_provider().isoformat(),
                     "is_shadow": order.is_shadow,
                     "error": str(exc),
                     "reduce_only": reduce_only,

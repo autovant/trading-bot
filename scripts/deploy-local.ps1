@@ -15,6 +15,8 @@ $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = (Resolve-Path (Join-Path $ScriptRoot "..")).Path
 Set-Location $RepoRoot
 
+$ThisScript = $MyInvocation.MyCommand.Path
+
 $RunDir = Join-Path $RepoRoot "run"
 $LogDir = Join-Path $RepoRoot "logs"
 $ToolsDir = Join-Path $RepoRoot "tools"
@@ -26,7 +28,9 @@ $EnvFile = Join-Path $RepoRoot ".env"
 $EnvExample = Join-Path $RepoRoot ".env.example"
 $NatsPidFile = Join-Path $RunDir "nats.pid"
 $NatsLog = Join-Path $LogDir "nats.log"
+$ActiveModeFile = Join-Path $RunDir "active-mode.txt"
 $Global:Services = @()
+$Global:LocalEnv = @{}
 
 function Get-DefaultEnvLines {
     return @(
@@ -35,14 +39,11 @@ function Get-DefaultEnvLines {
         "DB_URL=sqlite+aiosqlite:///./dev.db",
         "API_PORT=8080",
         "UI_PORT=8501",
-        "OPS_API_URL=http://127.0.0.1:8080",
-        "REPLAY_URL=http://127.0.0.1:8085",
         "EXEC_PORT=8082",
         "FEED_PORT=8081",
         "RISK_PORT=8083",
         "REPORTER_PORT=8084",
         "REPLAY_PORT=8085",
-        "OPS_PORT=8080",
         "LOG_LEVEL=INFO"
     )
 }
@@ -113,7 +114,7 @@ function Resolve-Python {
         }
     }
 
-    throw "No suitable Python interpreter found. Install Python 3.9+ and retry."
+    throw "No suitable Python interpreter found. Install Python 3.11+ (or the highest 3.x) and retry."
 }
 
 function Ensure-Venv {
@@ -124,12 +125,13 @@ function Ensure-Venv {
         & $PythonPath -m venv $VenvDir
     }
 
-    Write-Log "Upgrading pip"
+    Write-Log "Upgrading pip inside the virtual environment"
     & $VenvPython -m pip install --upgrade pip | Write-Host
 
-    if (Test-Path (Join-Path $RepoRoot "requirements.txt")) {
+    $requirements = Join-Path $RepoRoot "requirements.txt"
+    if (Test-Path $requirements) {
         Write-Log "Installing dependencies from requirements.txt"
-        & $VenvPython -m pip install -r (Join-Path $RepoRoot "requirements.txt") | Write-Host
+        & $VenvPython -m pip install -r $requirements | Write-Host
     }
     else {
         $defaultPackages = @(
@@ -157,41 +159,93 @@ function Ensure-Env {
     if (-not (Test-Path $EnvFile)) {
         New-DefaultEnv
     }
-    $defaults = Get-DefaultEnvLines
-    Write-Log "Ensuring .env.example with default values"
-    Set-Content -Path $EnvExample -Value ($defaults -join [Environment]::NewLine)
+    if (-not (Test-Path $EnvExample)) {
+        Write-Log "Creating .env.example with safe defaults"
+        Set-Content -Path $EnvExample -Value ((Get-DefaultEnvLines) -join [Environment]::NewLine)
+    }
 }
 
 function Load-Env {
     param([string]$Path)
+    if (-not (Test-Path $Path)) { return }
     Write-Log "Loading environment variables from $Path"
+    $Global:LocalEnv.Clear()
     $lines = Get-Content $Path
     foreach ($line in $lines) {
-        if ($line.Trim().StartsWith("#") -or -not $line.Contains("=")) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith("#") -or -not $trimmed.Contains("=")) {
             continue
         }
-        $pair = $line.Split("=", 2)
+        $pair = $trimmed.Split("=", 2)
         $key = $pair[0].Trim()
         $value = $pair[1].Trim().Trim('"').Trim("'")
         if ($key) {
-            Set-Item -Path "env:$key" -Value $value
+            $Global:LocalEnv[$key] = $value
+        }
+    }
+}
+
+function Get-LocalEnvValue {
+    param(
+        [string]$Key,
+        [string]$Default
+    )
+    if ($Global:LocalEnv.ContainsKey($Key) -and $Global:LocalEnv[$Key]) {
+        return $Global:LocalEnv[$Key]
+    }
+    return $Default
+}
+
+function Set-LocalEnvDefault {
+    param(
+        [string]$Key,
+        [string]$Value
+    )
+    if (-not $Global:LocalEnv.ContainsKey($Key) -or -not $Global:LocalEnv[$Key]) {
+        $Global:LocalEnv[$Key] = $Value
+    }
+}
+
+function Ensure-DerivedEnv {
+    Set-LocalEnvDefault "NATS_URL" "nats://127.0.0.1:4222"
+    Set-LocalEnvDefault "DB_URL" "sqlite+aiosqlite:///./dev.db"
+    Set-LocalEnvDefault "API_PORT" "8080"
+    Set-LocalEnvDefault "UI_PORT" "8501"
+    Set-LocalEnvDefault "EXEC_PORT" "8082"
+    Set-LocalEnvDefault "FEED_PORT" "8081"
+    Set-LocalEnvDefault "RISK_PORT" "8083"
+    Set-LocalEnvDefault "REPORTER_PORT" "8084"
+    Set-LocalEnvDefault "REPLAY_PORT" "8085"
+    Set-LocalEnvDefault "OPS_PORT" "8080"
+    $currentApiPort = Get-LocalEnvValue "API_PORT" "8080"
+    $currentReplayPort = Get-LocalEnvValue "REPLAY_PORT" "8085"
+    Set-LocalEnvDefault "OPS_API_URL" "http://127.0.0.1:$currentApiPort"
+    Set-LocalEnvDefault "REPLAY_URL" "http://127.0.0.1:$currentReplayPort"
+}
+
+function Export-LocalEnv {
+    foreach ($entry in $Global:LocalEnv.GetEnumerator()) {
+        $key = $entry.Key
+        $value = $entry.Value
+        if ($null -ne $value) {
+            Set-Item -Path ("Env:{0}" -f $key) -Value $value
         }
     }
 }
 
 function Get-Ports {
     return @{
-        api = if ($env:API_PORT) { $env:API_PORT } else { "8080" }
-        ui = if ($env:UI_PORT) { $env:UI_PORT } else { "8501" }
-        exec = if ($env:EXEC_PORT) { $env:EXEC_PORT } else { "8082" }
-        feed = if ($env:FEED_PORT) { $env:FEED_PORT } else { "8081" }
-        risk = if ($env:RISK_PORT) { $env:RISK_PORT } else { "8083" }
-        reporter = if ($env:REPORTER_PORT) { $env:REPORTER_PORT } else { "8084" }
-        replay = if ($env:REPLAY_PORT) { $env:REPLAY_PORT } else { "8085" }
-        ops = if ($env:OPS_PORT) { $env:OPS_PORT } else { "8080" }
+        api      = Get-LocalEnvValue "API_PORT" "8080"
+        ui       = Get-LocalEnvValue "UI_PORT" "8501"
+        exec     = Get-LocalEnvValue "EXEC_PORT" "8082"
+        feed     = Get-LocalEnvValue "FEED_PORT" "8081"
+        risk     = Get-LocalEnvValue "RISK_PORT" "8083"
+        reporter = Get-LocalEnvValue "REPORTER_PORT" "8084"
+        replay   = Get-LocalEnvValue "REPLAY_PORT" "8085"
     }
 }
 
+# Edit the map below to tweak service commands, ports, or health checks.
 function Get-ServiceDefinitions {
     param([string]$PythonPath)
 
@@ -215,88 +269,147 @@ function Get-ServiceDefinitions {
             LogPath = Join-Path $LogDir "engine.log"
             PidPath = Join-Path $RunDir "engine.pid"
             HealthUrl = $null
+            Port = $null
+            Modes = @("paper", "live", "replay")
         },
         [pscustomobject]@{
             Name = "ops-api"
             FilePath = $PythonPath
-            Arguments = @("-m", "uvicorn", "src.ops_api_service:app", "--host", "127.0.0.1", "--port", $ports.ops, "--reload")
+            Arguments = @(
+                "-m", "uvicorn", "src.ops_api_service:app",
+                "--host", "127.0.0.1",
+                "--port", $ports.api
+            )
             WorkingDirectory = $RepoRoot
             LogPath = Join-Path $LogDir "ops-api.log"
             PidPath = Join-Path $RunDir "ops-api.pid"
-            HealthUrl = "http://127.0.0.1:$($ports.ops)/health"
+            HealthUrl = "http://127.0.0.1:$($ports.api)/health"
+            Port = $ports.api
+            Modes = @("paper", "live", "replay")
         },
         [pscustomobject]@{
             Name = "feed"
             FilePath = $PythonPath
-            Arguments = @("-m", "uvicorn", "src.services.feed:app", "--host", "127.0.0.1", "--port", $ports.feed, "--reload")
+            Arguments = @(
+                "-m", "uvicorn", "src.services.feed:app",
+                "--host", "127.0.0.1",
+                "--port", $ports.feed
+            )
             WorkingDirectory = $RepoRoot
             LogPath = Join-Path $LogDir "feed.log"
             PidPath = Join-Path $RunDir "feed.pid"
             HealthUrl = "http://127.0.0.1:$($ports.feed)/health"
+            Port = $ports.feed
+            Modes = @("paper", "live")
         },
         [pscustomobject]@{
             Name = "execution"
             FilePath = $PythonPath
-            Arguments = @("-m", "uvicorn", "src.services.execution:app", "--host", "127.0.0.1", "--port", $ports.exec, "--reload")
+            Arguments = @(
+                "-m", "uvicorn", "src.services.execution:app",
+                "--host", "127.0.0.1",
+                "--port", $ports.exec
+            )
             WorkingDirectory = $RepoRoot
             LogPath = Join-Path $LogDir "execution.log"
             PidPath = Join-Path $RunDir "execution.pid"
             HealthUrl = "http://127.0.0.1:$($ports.exec)/health"
+            Port = $ports.exec
+            Modes = @("paper", "live", "replay")
         },
         [pscustomobject]@{
             Name = "risk"
             FilePath = $PythonPath
-            Arguments = @("-m", "uvicorn", "src.services.risk:app", "--host", "127.0.0.1", "--port", $ports.risk, "--reload")
+            Arguments = @(
+                "-m", "uvicorn", "src.services.risk:app",
+                "--host", "127.0.0.1",
+                "--port", $ports.risk
+            )
             WorkingDirectory = $RepoRoot
             LogPath = Join-Path $LogDir "risk.log"
             PidPath = Join-Path $RunDir "risk.pid"
             HealthUrl = "http://127.0.0.1:$($ports.risk)/health"
+            Port = $ports.risk
+            Modes = @("paper", "live", "replay")
         },
         [pscustomobject]@{
             Name = "reporter"
             FilePath = $PythonPath
-            Arguments = @("-m", "uvicorn", "src.services.reporter:app", "--host", "127.0.0.1", "--port", $ports.reporter, "--reload")
+            Arguments = @(
+                "-m", "uvicorn", "src.services.reporter:app",
+                "--host", "127.0.0.1",
+                "--port", $ports.reporter
+            )
             WorkingDirectory = $RepoRoot
             LogPath = Join-Path $LogDir "reporter.log"
             PidPath = Join-Path $RunDir "reporter.pid"
             HealthUrl = "http://127.0.0.1:$($ports.reporter)/health"
+            Port = $ports.reporter
+            Modes = @("paper", "live", "replay")
         },
         [pscustomobject]@{
             Name = "replay"
             FilePath = $PythonPath
-            Arguments = @("-m", "uvicorn", "src.services.replay:app", "--host", "127.0.0.1", "--port", $ports.replay, "--reload")
+            Arguments = @(
+                "-m", "uvicorn", "src.services.replay:app",
+                "--host", "127.0.0.1",
+                "--port", $ports.replay
+            )
             WorkingDirectory = $RepoRoot
             LogPath = Join-Path $LogDir "replay.log"
             PidPath = Join-Path $RunDir "replay.pid"
             HealthUrl = "http://127.0.0.1:$($ports.replay)/health"
+            Port = $ports.replay
+            Modes = @("replay")
         },
         [pscustomobject]@{
             Name = "dashboard"
             FilePath = $PythonPath
-            Arguments = @("-m", "streamlit", "run", "dashboard/app.py", "--server.port", $ports.ui, "--server.headless", "true", "--browser.gatherUsageStats", "false")
+            Arguments = @(
+                "-m", "streamlit", "run", "dashboard/app.py",
+                "--server.port", $ports.ui,
+                "--server.headless", "true",
+                "--browser.gatherUsageStats", "false"
+            )
             WorkingDirectory = $RepoRoot
             LogPath = Join-Path $LogDir "dashboard.log"
             PidPath = Join-Path $RunDir "dashboard.pid"
             HealthUrl = "http://127.0.0.1:$($ports.ui)/_stcore/health"
+            Port = $ports.ui
+            Modes = @("paper", "live", "replay")
         }
     )
 
     return $Global:Services
 }
 
+function Should-RunService {
+    param(
+        $Service,
+        [string]$Mode
+    )
+    if (-not $Service.Modes -or $Service.Modes.Count -eq 0) {
+        return $true
+    }
+    return $Service.Modes -contains $Mode
+}
+
 function Test-ProcessAlive {
     param([string]$PidPath)
     if (-not (Test-Path $PidPath)) { return $null }
-    $pid = (Get-Content $PidPath | Select-Object -First 1).Trim()
-    if (-not $pid) { return $null }
-    $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-    if ($null -ne $proc) {
-        return $proc
-    }
-    else {
+    $pidValue = (Get-Content $PidPath | Select-Object -First 1).Trim()
+    if (-not $pidValue) { return $null }
+    $pidCandidate = 0
+    if (-not [int]::TryParse($pidValue, [ref]$pidCandidate)) {
         Remove-Item $PidPath -ErrorAction SilentlyContinue
         return $null
     }
+    $proc = Get-Process -Id $pidCandidate -ErrorAction SilentlyContinue
+    if ($null -ne $proc) {
+        return $proc
+    }
+    Remove-Item $PidPath -ErrorAction SilentlyContinue
+    return $null
 }
 
 function Start-ServiceProcess {
@@ -311,8 +424,89 @@ function Start-ServiceProcess {
     $arguments = $Service.Arguments
     Write-Log "Starting $($Service.Name): $($Service.FilePath) $($arguments -join ' ')"
     $stdErrLog = "$($Service.LogPath).err"
-    $process = Start-Process -FilePath $Service.FilePath -ArgumentList $arguments -WorkingDirectory $Service.WorkingDirectory -PassThru -RedirectStandardOutput $Service.LogPath -RedirectStandardError $stdErrLog
+    $process = Start-Process `
+        -FilePath $Service.FilePath `
+        -ArgumentList $arguments `
+        -WorkingDirectory $Service.WorkingDirectory `
+        -PassThru `
+        -RedirectStandardOutput $Service.LogPath `
+        -RedirectStandardError $stdErrLog
     Set-Content -Path $Service.PidPath -Value $process.Id
+}
+
+function Test-ServiceHealth {
+    param(
+        $Service,
+        [switch]$Quiet
+    )
+    if (-not $Service.HealthUrl) {
+        return $true
+    }
+    try {
+        $response = Invoke-WebRequest -Uri $Service.HealthUrl -UseBasicParsing -TimeoutSec 5
+        return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300)
+    }
+    catch {
+        if (-not $Quiet) {
+            Write-Log "$($Service.Name) health probe failed: $($_.Exception.Message)" "WARN"
+        }
+        return $false
+    }
+}
+
+function Wait-ForServiceHealth {
+    param(
+        $Service,
+        [int]$TimeoutSec = 45
+    )
+    if (-not $Service.HealthUrl) {
+        return $true
+    }
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-ServiceHealth -Service $Service -Quiet) {
+            Write-Log "$($Service.Name) passed warmup health check"
+            return $true
+        }
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+
+function Ensure-ServiceRunning {
+    param(
+        $Service,
+        [string]$Mode
+    )
+    if (-not (Should-RunService -Service $Service -Mode $Mode)) {
+        Write-Log "$($Service.Name) skipped for mode $Mode"
+        return
+    }
+
+    $maxAttempts = 2
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $existing = Test-ProcessAlive -PidPath $Service.PidPath
+        if ($existing -and (Test-ServiceHealth -Service $Service -Quiet)) {
+            Write-Log "$($Service.Name) already running (PID $($existing.Id))"
+            return
+        }
+        if ($existing) {
+            Write-Log "$($Service.Name) running but unhealthy; restarting (attempt $attempt/$maxAttempts)" "WARN"
+            Stop-ServiceProcess -Service $Service
+            Start-Sleep -Seconds 2
+        }
+
+        Start-ServiceProcess -Service $Service
+        if (Wait-ForServiceHealth -Service $Service -TimeoutSec 45) {
+            return
+        }
+
+        Write-Log "$($Service.Name) failed warmup health (attempt $attempt/$maxAttempts). Restarting..." "WARN"
+        Stop-ServiceProcess -Service $Service
+        Start-Sleep -Seconds 2
+    }
+
+    throw "$($Service.Name) failed to become healthy after $maxAttempts attempts. Check $($Service.LogPath) and $($Service.LogPath).err"
 }
 
 function Stop-ServiceProcess {
@@ -325,7 +519,7 @@ function Stop-ServiceProcess {
         }
         catch {}
         Start-Sleep -Seconds 2
-        if (!$process.HasExited) {
+        if (-not $process.HasExited) {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         }
     }
@@ -335,8 +529,9 @@ function Stop-ServiceProcess {
 }
 
 function Start-AllServices {
+    param([string]$Mode)
     foreach ($service in $Global:Services) {
-        Start-ServiceProcess -Service $service
+        Ensure-ServiceRunning -Service $service -Mode $Mode
     }
 }
 
@@ -347,13 +542,26 @@ function Stop-AllServices {
 }
 
 function Show-ServiceStatus {
+    param([string]$Mode)
     $rows = @()
     foreach ($service in $Global:Services) {
+        $expected = Should-RunService -Service $service -Mode $Mode
         $process = Test-ProcessAlive -PidPath $service.PidPath
+        if (-not $expected) {
+            $rows += [pscustomobject]@{
+                Name = $service.Name
+                PID = "-"
+                Port = if ($service.Port) { $service.Port } else { "-" }
+                Status = "SKIPPED ($Mode)"
+                Log = $service.LogPath
+            }
+            continue
+        }
         if ($process) {
             $rows += [pscustomobject]@{
                 Name = $service.Name
                 PID = $process.Id
+                Port = if ($service.Port) { $service.Port } else { "-" }
                 Status = "RUNNING"
                 Log = $service.LogPath
             }
@@ -362,6 +570,7 @@ function Show-ServiceStatus {
             $rows += [pscustomobject]@{
                 Name = $service.Name
                 PID = "-"
+                Port = if ($service.Port) { $service.Port } else { "-" }
                 Status = "STOPPED"
                 Log = $service.LogPath
             }
@@ -376,11 +585,19 @@ function Show-ServiceStatus {
 }
 
 function Invoke-HealthChecks {
-    param([int]$TimeoutSec = 60)
+    param(
+        [int]$TimeoutSec = 60,
+        [string]$Mode
+    )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     $results = @{}
+
     foreach ($service in $Global:Services) {
+        if (-not (Should-RunService -Service $service -Mode $Mode)) {
+            $results[$service.Name] = $true
+            continue
+        }
         if ($service.HealthUrl) {
             $results[$service.Name] = $false
         }
@@ -391,6 +608,7 @@ function Invoke-HealthChecks {
 
     while ((Get-Date) -lt $deadline) {
         foreach ($service in $Global:Services) {
+            if (-not (Should-RunService -Service $service -Mode $Mode)) { continue }
             if (-not $service.HealthUrl) { continue }
             if ($results[$service.Name]) { continue }
             try {
@@ -411,6 +629,10 @@ function Invoke-HealthChecks {
     }
 
     foreach ($service in $Global:Services) {
+        if (-not (Should-RunService -Service $service -Mode $Mode)) {
+            Write-Log "$($service.Name) skipped for mode $Mode"
+            continue
+        }
         if ($results[$service.Name]) {
             Write-Log "$($service.Name) HEALTHY"
         }
@@ -423,7 +645,7 @@ function Invoke-HealthChecks {
         throw "One or more services failed health checks."
     }
     else {
-        Write-Log "All services healthy. READY"
+        Write-Log "All requested services healthy. READY"
     }
 }
 
@@ -432,7 +654,7 @@ function Ensure-NatsBinary {
         return
     }
 
-    Write-Log "NATS binary not found. Downloading latest release"
+    Write-Log "NATS binary not found. Downloading latest Windows release"
     $releaseUrl = "https://api.github.com/repos/nats-io/nats-server/releases/latest"
     $zipPath = Join-Path $NatsDir "nats-server.zip"
     try {
@@ -444,7 +666,7 @@ function Ensure-NatsBinary {
         $downloadUrl = $asset.browser_download_url
     }
     catch {
-        Write-Log "Failed to query GitHub releases. Falling back to pinned version" "WARN"
+        Write-Log "Failed to query GitHub releases. Falling back to pinned NATS v2.10.14" "WARN"
         $downloadUrl = "https://github.com/nats-io/nats-server/releases/download/v2.10.14/nats-server-v2.10.14-windows-amd64.zip"
     }
 
@@ -467,27 +689,65 @@ function Ensure-NatsBinary {
     }
     catch {
         Write-Log "Unable to download or extract NATS: $_" "ERROR"
-        throw "NATS setup failed. Ensure internet connectivity or manually place nats-server.exe under tools\\nats."
+        throw "NATS setup failed. Ensure internet connectivity or manually place nats-server.exe under tools\nats."
     }
 }
 
 function Start-Nats {
     Ensure-NatsBinary
+    $maxAttempts = 3
+    $arguments = @("--addr", "127.0.0.1", "--http_port", "8222")
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $existing = Test-ProcessAlive -PidPath $NatsPidFile
+        if ($existing) {
+            if (Test-NatsHealth -Quiet) {
+                Write-Log "NATS already running (PID $($existing.Id))"
+                return
+            }
+            Write-Log "NATS process $($existing.Id) unhealthy; restarting" "WARN"
+            Stop-Nats
+            Start-Sleep -Seconds 2
+        }
 
-    $existing = Test-ProcessAlive -PidPath $NatsPidFile
-    if ($existing) {
-        Write-Log "NATS already running (PID $($existing.Id))"
-        return
+        Write-Log "Starting NATS server (attempt $attempt/$maxAttempts)"
+        $stdErrLog = "$NatsLog.err"
+        $process = Start-Process `
+            -FilePath $NatsExe `
+            -ArgumentList $arguments `
+            -WorkingDirectory $NatsDir `
+            -PassThru `
+            -RedirectStandardOutput $NatsLog `
+            -RedirectStandardError $stdErrLog
+        Set-Content -Path $NatsPidFile -Value $process.Id
+
+        if (Wait-ForNatsHealthy -TimeoutSec 20) {
+            Write-Log "NATS ready (PID $($process.Id))"
+            return
+        }
+
+        Write-Log "NATS failed to report healthy (attempt $attempt/$maxAttempts). Retrying..." "WARN"
+        Write-Log "If Windows prompts for network access, click 'Allow' to let nats-server bind to localhost." "WARN"
+        Stop-Nats
+        Start-Sleep -Seconds 2
     }
 
-    $arguments = @("-p", "4222", "--http_port", "8222")
-    Write-Log "Starting NATS server"
-    $stdErrLog = "$NatsLog.err"
-    $process = Start-Process -FilePath $NatsExe -ArgumentList $arguments -WorkingDirectory $NatsDir -PassThru -RedirectStandardOutput $NatsLog -RedirectStandardError $stdErrLog
-    Set-Content -Path $NatsPidFile -Value $process.Id
-    if (-not $env:NATS_URL) {
-        $env:NATS_URL = "nats://127.0.0.1:4222"
+    $tail = ""
+    if (Test-Path "$NatsLog.err") {
+        $tail = (Get-Content "$NatsLog.err" -Tail 15) -join [Environment]::NewLine
     }
+    throw "NATS could not start after $maxAttempts attempts. Check logs/nats.log.err for details.`n$tail"
+}
+
+function Wait-ForNatsHealthy {
+    param([int]$TimeoutSec = 20)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-NatsHealth -Quiet) {
+            return $true
+        }
+        Start-Sleep -Seconds 2
+    }
+    return $false
 }
 
 function Stop-Nats {
@@ -499,7 +759,7 @@ function Stop-Nats {
         }
         catch {}
         Start-Sleep -Seconds 2
-        if (!$process.HasExited) {
+        if (-not $process.HasExited) {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         }
     }
@@ -519,15 +779,20 @@ function Show-NatsStatus {
 }
 
 function Test-NatsHealth {
+    param([switch]$Quiet)
     try {
         $response = Invoke-WebRequest -Uri "http://127.0.0.1:8222/healthz" -UseBasicParsing -TimeoutSec 5
         if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
-            Write-Log "NATS HEALTHY"
+            if (-not $Quiet) {
+                Write-Log "NATS HEALTHY"
+            }
             return $true
         }
     }
     catch {}
-    Write-Log "NATS health check failed" "ERROR"
+    if (-not $Quiet) {
+        Write-Log "NATS health check failed" "ERROR"
+    }
     return $false
 }
 
@@ -537,6 +802,9 @@ function Perform-Clean {
     if (Test-Path $RunDir) {
         Write-Log "Clearing run directory"
         Get-ChildItem $RunDir -Filter *.pid -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        if (Test-Path $ActiveModeFile) {
+            Remove-Item $ActiveModeFile -ErrorAction SilentlyContinue
+        }
     }
     if (Test-Path $LogDir) {
         Write-Log "Clearing logs directory"
@@ -556,6 +824,9 @@ function Register-CtrlCHandler {
         Write-Host "`nCtrl+C detected. Stopping services..."
         Stop-Nats
         Stop-AllServices
+        if (Test-Path $ActiveModeFile) {
+            Remove-Item $ActiveModeFile -ErrorAction SilentlyContinue
+        }
         exit 1
     } | Out-Null
 }
@@ -564,7 +835,20 @@ try {
     Ensure-Dirs
     Ensure-Env
     Load-Env -Path $EnvFile
-    $env:APP_MODE = $Mode
+    Ensure-DerivedEnv
+    Export-LocalEnv
+
+    $ModeWasExplicit = $PSBoundParameters.ContainsKey("Mode")
+    $EffectiveMode = $Mode
+    if ($Action -ne "start" -and -not $ModeWasExplicit -and (Test-Path $ActiveModeFile)) {
+        $stored = (Get-Content $ActiveModeFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
+        if ($stored) {
+            $EffectiveMode = $stored
+            Write-Log "Mode argument not provided; using stored mode '$stored'."
+        }
+    }
+    $Global:ActiveMode = $EffectiveMode
+    $env:APP_MODE = $Global:ActiveMode
 
     switch ($Action) {
         "start" {
@@ -578,33 +862,37 @@ try {
             $servicePython = $VenvPython
             Get-ServiceDefinitions -PythonPath $servicePython | Out-Null
             Start-Nats
-            Start-AllServices
+            Start-AllServices -Mode $Global:ActiveMode
             Start-Sleep -Seconds 3
-            Invoke-HealthChecks -TimeoutSec 60
+            Invoke-HealthChecks -TimeoutSec 60 -Mode $Global:ActiveMode
+            Set-Content -Path $ActiveModeFile -Value $Global:ActiveMode
         }
         "stop" {
             $pythonPath = if (Test-Path $VenvPython) { $VenvPython } elseif ($Python) { Resolve-Python -Requested $Python } else { "python" }
             Get-ServiceDefinitions -PythonPath $pythonPath | Out-Null
             Stop-AllServices
             Stop-Nats
+            if (Test-Path $ActiveModeFile) {
+                Remove-Item $ActiveModeFile -ErrorAction SilentlyContinue
+            }
         }
         "restart" {
-            & $MyInvocation.MyCommand.Path -Action stop -Mode $Mode -Python $Python
-            & $MyInvocation.MyCommand.Path -Action start -Mode $Mode -Python $Python
+            & $ThisScript -Action stop -Mode $Mode -Python $Python
+            & $ThisScript -Action start -Mode $Mode -Python $Python
             return
         }
         "status" {
             $pythonPath = if (Test-Path $VenvPython) { $VenvPython } elseif ($Python) { Resolve-Python -Requested $Python } else { "python" }
             Get-ServiceDefinitions -PythonPath $pythonPath | Out-Null
             Show-NatsStatus
-            Show-ServiceStatus
+            Show-ServiceStatus -Mode $Global:ActiveMode
         }
         "health" {
             $pythonPath = if (Test-Path $VenvPython) { $VenvPython } elseif ($Python) { Resolve-Python -Requested $Python } else { "python" }
             Get-ServiceDefinitions -PythonPath $pythonPath | Out-Null
             $natsHealthy = Test-NatsHealth
             try {
-                Invoke-HealthChecks -TimeoutSec 5
+                Invoke-HealthChecks -TimeoutSec 5 -Mode $Global:ActiveMode
                 if (-not $natsHealthy) { exit 1 }
             }
             catch {

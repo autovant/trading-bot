@@ -1,0 +1,71 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.7, pytest-8.1.1, pluggy-1.6.0 -- C:\Python313\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\Samad\repos\trading-bot
+plugins: anyio-3.7.1, asyncio-0.21.1, cov-5.0.0
+asyncio: mode=Mode.STRICT
+collecting ... collected 1 item
+
+tests/test_paper_broker.py::test_market_order_buy FAILED                 [100%]
+
+================================== FAILURES ===================================
+____________________________ test_market_order_buy ____________________________
+
+    def test_market_order_buy():
+>       run_async(_test_market_order_buy_impl())
+
+tests\test_paper_broker.py:77: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\test_paper_broker.py:11: in run_async
+    return asyncio.run(coro)
+C:\Python313\Lib\asyncio\runners.py:195: in run
+    return runner.run(main)
+C:\Python313\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+C:\Python313\Lib\asyncio\base_events.py:725: in run_until_complete
+    return future.result()
+tests\test_paper_broker.py:65: in _test_market_order_buy_impl
+    positions = await broker.get_positions()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <src.paper_trader.PaperBroker object at 0x0000023F6F2FA270>
+
+    async def get_positions(self) -> List[Position]:
+        async with self._lock:
+            return [
+                Position(
+                    symbol=symbol,
+                    side="long" if state.size >= 0 else "short",
+                    size=abs(state.size),
+                    entry_price=state.avg_price,
+                    mark_price=self._market_state.get(
+>                       symbol, MarketSnapshot(symbol, 0, 0, 0, 0, 0)
+                    ).mid_price,
+                    unrealized_pnl=state.unrealized_pnl,
+                    percentage=self._position_return_pct(state),
+                    mode=self.mode,
+                    run_id=self.run_id,
+                )
+                for symbol, state in self._positions.items()
+                if state.size != 0
+            ]
+E           TypeError: BaseModel.__init__() takes 1 positional argument but 7 were given
+
+src\paper_trader.py:267: TypeError
+============================== warnings summary ===============================
+tests/test_paper_broker.py::test_market_order_buy
+  C:\Users\Samad\repos\trading-bot\tests\test_paper_broker.py:45: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    timestamp=datetime.utcnow()
+
+tests/test_paper_broker.py::test_market_order_buy
+  C:\Users\Samad\repos\trading-bot\src\paper_trader.py:530: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    timestamp=datetime.utcnow(),
+
+tests/test_paper_broker.py::test_market_order_buy
+  C:\Users\Samad\repos\trading-bot\src\paper_trader.py:602: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "timestamp": datetime.utcnow().isoformat(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_paper_broker.py::test_market_order_buy - TypeError: BaseMod...
+======================== 1 failed, 3 warnings in 1.20s ========================

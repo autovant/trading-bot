@@ -193,54 +193,67 @@ class TechnicalIndicators:
     def detect_divergence(
         price_data: pd.Series, indicator_data: pd.Series, k: int = 3
     ) -> dict:
-        """Detect bullish and bearish divergences."""
+        """Detect regular and hidden bullish/bearish divergences."""
         try:
             # Find pivots
-            price_pivots = TechnicalIndicators.find_pivots(price_data, k)
-            indicator_pivots = TechnicalIndicators.find_pivots(indicator_data, k)
+            price_pivots_max = argrelextrema(price_data.to_numpy(), np.greater, order=k)[0]
+            price_pivots_min = argrelextrema(price_data.to_numpy(), np.less, order=k)[0]
+            
+            ind_pivots_max = argrelextrema(indicator_data.to_numpy(), np.greater, order=k)[0]
+            ind_pivots_min = argrelextrema(indicator_data.to_numpy(), np.less, order=k)[0]
 
-            if len(price_pivots) < 2 or len(indicator_pivots) < 2:
-                return {"bullish": False, "bearish": False}
-
-            # Get recent pivots
-            recent_price_pivots = price_pivots[-2:]
-            recent_indicator_pivots = indicator_pivots[-2:]
-
-            # Check for divergences
-            bullish_divergence = False
-            bearish_divergence = False
-
-            if len(recent_price_pivots) >= 2 and len(recent_indicator_pivots) >= 2:
-                # Price trend
-                price_trend = (
-                    price_data.iloc[recent_price_pivots[-1]]
-                    - price_data.iloc[recent_price_pivots[-2]]
-                )
-
-                # Indicator trend
-                indicator_trend = (
-                    indicator_data.iloc[recent_indicator_pivots[-1]]
-                    - indicator_data.iloc[recent_indicator_pivots[-2]]
-                )
-
-                # Bullish divergence: price down, indicator up
-                if price_trend < 0 and indicator_trend > 0:
-                    bullish_divergence = True
-
-                # Bearish divergence: price up, indicator down
-                if price_trend > 0 and indicator_trend < 0:
-                    bearish_divergence = True
-
-            return {
-                "bullish": bullish_divergence,
-                "bearish": bearish_divergence,
-                "price_pivots": recent_price_pivots,
-                "indicator_pivots": recent_indicator_pivots,
+            # Initialize results
+            results = {
+                "regular_bullish": False,
+                "regular_bearish": False,
+                "hidden_bullish": False,
+                "hidden_bearish": False
             }
+
+            # Need at least 2 pivots to compare
+            if len(price_pivots_min) >= 2 and len(ind_pivots_min) >= 2:
+                # Check Minima (Bullish Divergences)
+                # We look at the last two minima
+                p_min_curr = price_data.iloc[price_pivots_min[-1]]
+                p_min_prev = price_data.iloc[price_pivots_min[-2]]
+                
+                i_min_curr = indicator_data.iloc[ind_pivots_min[-1]]
+                i_min_prev = indicator_data.iloc[ind_pivots_min[-2]]
+                
+                # Regular Bullish: Price Lower Low, Indicator Higher Low
+                if p_min_curr < p_min_prev and i_min_curr > i_min_prev:
+                    results["regular_bullish"] = True
+                
+                # Hidden Bullish: Price Higher Low, Indicator Lower Low
+                if p_min_curr > p_min_prev and i_min_curr < i_min_prev:
+                    results["hidden_bullish"] = True
+
+            if len(price_pivots_max) >= 2 and len(ind_pivots_max) >= 2:
+                # Check Maxima (Bearish Divergences)
+                p_max_curr = price_data.iloc[price_pivots_max[-1]]
+                p_max_prev = price_data.iloc[price_pivots_max[-2]]
+                
+                i_max_curr = indicator_data.iloc[ind_pivots_max[-1]]
+                i_max_prev = indicator_data.iloc[ind_pivots_max[-2]]
+                
+                # Regular Bearish: Price Higher High, Indicator Lower High
+                if p_max_curr > p_max_prev and i_max_curr < i_max_prev:
+                    results["regular_bearish"] = True
+                    
+                # Hidden Bearish: Price Lower High, Indicator Higher High
+                if p_max_curr < p_max_prev and i_max_curr > i_max_prev:
+                    results["hidden_bearish"] = True
+
+            return results
 
         except Exception as e:
             logger.error(f"Error detecting divergence: {e}")
-            return {"bullish": False, "bearish": False}
+            return {
+                "regular_bullish": False,
+                "regular_bearish": False,
+                "hidden_bullish": False,
+                "hidden_bearish": False
+            }
 
     @staticmethod
     def support_resistance_levels(
@@ -344,3 +357,73 @@ class TechnicalIndicators:
         except Exception as e:
             logger.error(f"Error calculating volume profile: {e}")
             return {"prices": [], "volumes": []}
+
+    @staticmethod
+    def vwap(data: pd.DataFrame) -> pd.Series:
+        """Volume Weighted Average Price (Session/Cumulative)."""
+        v = data["volume"]
+        tp = (data["high"] + data["low"] + data["close"]) / 3
+        return (tp * v).cumsum() / v.cumsum()
+
+    @staticmethod
+    def rolling_vwap(data: pd.DataFrame, window: int = 20) -> pd.Series:
+        """Rolling Volume Weighted Average Price."""
+        v = data["volume"]
+        tp = (data["high"] + data["low"] + data["close"]) / 3
+        
+        pv = tp * v
+        
+        rolling_pv = pv.rolling(window=window).sum()
+        rolling_vol = v.rolling(window=window).sum()
+        
+        return rolling_pv / rolling_vol
+
+    @staticmethod
+    def ema_ribbon(data: pd.Series, periods: List[int] = None) -> pd.DataFrame:
+        """EMA Ribbon."""
+        if periods is None:
+            periods = [8, 13, 21, 34, 55]
+        
+        ribbon = pd.DataFrame(index=data.index)
+        for period in periods:
+            ribbon[f"EMA_{period}"] = TechnicalIndicators.ema(data, period)
+        
+        return ribbon
+
+    @staticmethod
+    def wavetrend_cipher_b(
+        data: pd.DataFrame, 
+        n1: int = 10, 
+        n2: int = 21
+    ) -> pd.DataFrame:
+        """
+        VuMan Chu Cipher B (WaveTrend) implementation.
+        Returns a DataFrame with:
+        - wt1: WaveTrend 1
+        - wt2: WaveTrend 2
+        - vwap: Money Flow (approx)
+        """
+        # Approximate Money Flow (HLC3)
+        ap = (data["high"] + data["low"] + data["close"]) / 3
+        
+        # ESA = EMA(AP, n1)
+        esa = TechnicalIndicators.ema(ap, n1)
+        
+        # D = EMA(abs(AP - ESA), n1)
+        d = TechnicalIndicators.ema((ap - esa).abs(), n1)
+        
+        # CI = (AP - ESA) / (0.015 * D)
+        ci = (ap - esa) / (0.015 * d)
+        
+        # TCI = EMA(CI, n2)
+        tci = TechnicalIndicators.ema(ci, n2)
+        
+        # WaveTrend
+        wt1 = tci
+        wt2 = TechnicalIndicators.sma(wt1, 4)
+        
+        return pd.DataFrame({
+            "wt1": wt1,
+            "wt2": wt2,
+            "diff": wt1 - wt2
+        })

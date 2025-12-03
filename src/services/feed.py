@@ -1,19 +1,16 @@
 """
-Synthetic market data feed implemented with FastAPI.
+Real-time market data feed using CCXT.
 
-This service generates plausible best bid/ask snapshots and publishes
-them to NATS so that the execution service (PaperBroker) receives a
-steady stream of updates even when no live exchange connection is
-available.
+This service fetches live ticker and order book data from the configured exchange
+and publishes it to NATS for the strategy and execution services.
 """
 
 from __future__ import annotations
 
 import asyncio
-import math
-import random
+import logging
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 from fastapi import FastAPI
 
@@ -21,19 +18,20 @@ from ..config import TradingBotConfig, load_config
 from ..metrics import SPREAD_ATR_PCT
 from ..messaging import MessagingClient
 from .base import BaseService, create_app
+from ..exchanges.ccxt_client import CCXTClient
+
+logger = logging.getLogger(__name__)
 
 
 class FeedService(BaseService):
-    """Background mock market-data publisher."""
+    """Background market-data publisher using CCXT."""
 
     def __init__(self) -> None:
         super().__init__("feed")
         self.config: Optional[TradingBotConfig] = None
         self.messaging: Optional[MessagingClient] = None
+        self.exchange_client: Optional[CCXTClient] = None
         self._task: Optional[asyncio.Task] = None
-        self._last_price: Dict[str, float] = {}
-        self._atr: Dict[str, float] = {}
-        random.seed()
 
     async def on_startup(self) -> None:
         self.config = load_config()
@@ -41,6 +39,12 @@ class FeedService(BaseService):
 
         self.messaging = MessagingClient({"servers": self.config.messaging.servers})
         await self.messaging.connect()
+        
+        # Initialize CCXT client
+        # For feed, we might want to use a public client (no keys) if possible,
+        # but using the configured credentials ensures higher rate limits.
+        self.exchange_client = CCXTClient(self.config.exchange)
+        await self.exchange_client.initialize()
 
         self._task = asyncio.create_task(self._run())
 
@@ -53,61 +57,74 @@ class FeedService(BaseService):
                 pass
             self._task = None
 
+        if self.exchange_client:
+            await self.exchange_client.close()
+            self.exchange_client = None
+
         if self.messaging:
             await self.messaging.close()
             self.messaging = None
 
     async def _run(self) -> None:
-        assert self.config and self.messaging
+        assert self.config and self.messaging and self.exchange_client
 
         symbols = self.config.trading.symbols
         subject = self.config.messaging.subjects["market_data"]
+        
+        logger.info(f"Starting feed for symbols: {symbols}")
 
         while True:
-            for symbol in symbols:
-                snapshot = self._generate_snapshot(symbol)
-                await self.messaging.publish(subject, snapshot)
-            await asyncio.sleep(1.0)
+            try:
+                # Fetch data for all symbols concurrently
+                tasks = [self._fetch_and_publish(symbol, subject) for symbol in symbols]
+                await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Rate limit compliance (simple sleep for now)
+                await asyncio.sleep(1.0)
+                
+            except Exception as e:
+                logger.error(f"Error in feed loop: {e}")
+                await asyncio.sleep(5.0)
 
-    def _generate_snapshot(self, symbol: str) -> Dict[str, float | str]:
-        last_price = self._last_price.get(symbol, 50_000.0)
-        drift = random.gauss(0, 25)
-        price = max(1_000.0, last_price + drift)
+    async def _fetch_and_publish(self, symbol: str, subject: str) -> None:
+        try:
+            ticker = await self.exchange_client.get_ticker(symbol)
+            if not ticker:
+                return
 
-        spread = max(price * 0.0004, 2.0)
-        atr = self._atr.get(symbol, spread)
-        atr = atr * 0.85 + spread * 0.15
+            # Construct snapshot compatible with existing consumers
+            # Ticker structure from CCXT:
+            # {'symbol': 'BTC/USDT', 'timestamp': 123, 'datetime': '...', 'high': ..., 'low': ..., 
+            #  'bid': ..., 'bidVolume': ..., 'ask': ..., 'askVolume': ..., ...}
+            
+            best_bid = ticker.get('bid')
+            best_ask = ticker.get('ask')
+            last_price = ticker.get('last')
+            
+            if best_bid is None or best_ask is None or last_price is None:
+                return
 
-        best_bid = price - spread / 2
-        best_ask = price + spread / 2
-
-        bid_size = 50 + random.random() * 50
-        ask_size = 50 + random.random() * 50
-        last_side = "buy" if price >= last_price else "sell"
-        last_size = (bid_size + ask_size) * 0.25
-        funding = 0.0001 * math.sin(datetime.now(timezone.utc).timestamp())
-        ofi = (bid_size - ask_size) * spread
-
-        mode = self.config.app_mode if self.config else "paper"
-        SPREAD_ATR_PCT.labels(mode=mode, symbol=symbol).set(
-            (spread / max(atr, 1.0)) * 100
-        )
-        self._last_price[symbol] = price
-        self._atr[symbol] = atr
-
-        return {
-            "symbol": symbol,
-            "best_bid": best_bid,
-            "best_ask": best_ask,
-            "bid_size": bid_size,
-            "ask_size": ask_size,
-            "last_price": price,
-            "last_side": last_side,
-            "last_size": last_size,
-            "funding_rate": funding,
-            "timestamp": datetime.utcnow().isoformat(),
-            "order_flow_imbalance": ofi,
-        }
+            # Estimate spread
+            spread = best_ask - best_bid
+            
+            snapshot = {
+                "symbol": symbol,
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "bid_size": ticker.get('bidVolume', 0.0),
+                "ask_size": ticker.get('askVolume', 0.0),
+                "last_price": last_price,
+                "last_side": "buy", # inferred or unavailable in simple ticker
+                "last_size": 0.0,   # unavailable in simple ticker
+                "funding_rate": 0.0, # would need separate call
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "order_flow_imbalance": 0.0, # requires L2 book
+            }
+            
+            await self.messaging.publish(subject, snapshot)
+            
+        except Exception as e:
+            logger.warning(f"Failed to fetch/publish for {symbol}: {e}")
 
 
 service = FeedService()

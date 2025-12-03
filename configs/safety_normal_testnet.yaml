@@ -1,0 +1,12 @@
+trading:
+  max_daily_risk: 0.05
+
+risk_management:
+  crisis_mode:
+    drawdown_threshold: 0.10
+
+perps:
+  sessionMaxTrades: 5
+  sessionMaxRuntimeMinutes: 5
+  maxMarginRatio: 0.80
+  consecutiveLossLimit: 3

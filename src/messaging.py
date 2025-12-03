@@ -51,7 +51,8 @@ class MessagingClient:
         self._needs_restore = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
-        self._max_retries = int(config.get("max_retries", 0))
+        max_retries_cfg = config.get("max_retries")
+        self._max_retries = int(max_retries_cfg) if max_retries_cfg is not None else 5
         self._publish_retries = int(config.get("publish_max_retries", 3))
         self._initial_backoff = float(config.get("initial_backoff", 0.5))
         self._max_backoff = float(config.get("max_backoff", 5.0))
@@ -104,70 +105,82 @@ class MessagingClient:
 
         return self.connected and self._is_nc_connected()
 
-    async def connect(self):
+    async def connect(self, timeout: Optional[float] = 10.0):
         """Connect to NATS server with retry/backoff logic."""
-        if not NATS_AVAILABLE:
-            logger.warning("NATS client not available. Messaging will be disabled.")
-            return
 
-        if self.nc is None:
-            if not callable(_NATSClientFactory):
-                logger.warning("NATS client factory unavailable; messaging disabled.")
+        async def _connect_inner() -> None:
+            if not NATS_AVAILABLE:
+                logger.warning("NATS client not available. Messaging will be disabled.")
                 return
-            self.nc = _NATSClientFactory()
 
-        if self.connected and self._is_nc_connected():
-            return
+            if self.nc is None:
+                if not callable(_NATSClientFactory):
+                    logger.warning("NATS client factory unavailable; messaging disabled.")
+                    return
+                self.nc = _NATSClientFactory()
 
-        async with self._connect_lock:
             if self.connected and self._is_nc_connected():
                 return
 
-            servers = self.config.get("servers", ["nats://localhost:4222"])
-            attempts = 0
-            max_attempts = self._max_retries if self._max_retries > 0 else None
-
-            while max_attempts is None or attempts < max_attempts:
-                attempts += 1
-                try:
-                    self._loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    self._loop = None
-
-                try:
-                    await self.nc.connect(
-                        servers=servers,
-                        allow_reconnect=True,
-                        max_reconnect_attempts=-1,
-                        reconnect_time_wait=self._reconnect_time_wait,
-                        connect_timeout=self._connect_timeout,
-                        error_cb=self._on_error,
-                        disconnected_cb=self._on_disconnected,
-                        reconnected_cb=self._on_reconnected,
-                        closed_cb=self._on_closed,
-                    )
-                    self.connected = True
-                    self._needs_restore = True
-                    await self._restore_subscriptions()
-                    logger.info("Connected to NATS servers: %s", servers)
+            async with self._connect_lock:
+                if self.connected and self._is_nc_connected():
                     return
-                except Exception as exc:
-                    self._set_disconnected()
-                    if max_attempts is not None and attempts >= max_attempts:
-                        logger.error(
-                            "Failed to connect to NATS after %s attempts: %s",
+
+                servers = self.config.get("servers", ["nats://localhost:4222"])
+                attempts = 0
+                max_attempts = self._max_retries if self._max_retries > 0 else None
+
+                while max_attempts is None or attempts < max_attempts:
+                    attempts += 1
+                    try:
+                        self._loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        self._loop = None
+
+                    try:
+                        await self.nc.connect(
+                            servers=servers,
+                            allow_reconnect=True,
+                            max_reconnect_attempts=-1,
+                            reconnect_time_wait=self._reconnect_time_wait,
+                            connect_timeout=self._connect_timeout,
+                            error_cb=self._on_error,
+                            disconnected_cb=self._on_disconnected,
+                            reconnected_cb=self._on_reconnected,
+                            closed_cb=self._on_closed,
+                        )
+                        self.connected = True
+                        self._needs_restore = True
+                        await self._restore_subscriptions()
+                        logger.info("Connected to NATS servers: %s", servers)
+                        return
+                    except Exception as exc:
+                        self._set_disconnected()
+                        if max_attempts is not None and attempts >= max_attempts:
+                            logger.error(
+                                "Failed to connect to NATS after %s attempts: %s",
+                                attempts,
+                                exc,
+                            )
+                            raise
+                        delay = self._compute_backoff(attempts - 1)
+                        logger.warning(
+                            "NATS connection attempt %s failed: %s; retrying in %.2fs",
                             attempts,
                             exc,
+                            delay,
                         )
-                        raise
-                    delay = self._compute_backoff(attempts - 1)
-                    logger.warning(
-                        "NATS connection attempt %s failed: %s; retrying in %.2fs",
-                        attempts,
-                        exc,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
+                        await asyncio.sleep(delay)
+
+        if timeout is None or timeout <= 0:
+            await _connect_inner()
+            return
+
+        try:
+            await asyncio.wait_for(_connect_inner(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            self._set_disconnected()
+            raise TimeoutError(f"NATS connect timed out after {timeout}s") from exc
 
     async def _on_error(self, error: Exception) -> None:
         logger.error("NATS client error: %s", error)
@@ -371,4 +384,25 @@ class MessagingClient:
                 )
                 await asyncio.sleep(delay)
 
+        return None
+
+
+class MockMessagingClient:
+    """Mock messaging client for when NATS is unavailable."""
+    
+    async def connect(self, timeout: float = 1.0):
+        logger.warning("Using MockMessagingClient (NATS unavailable)")
+
+    async def close(self):
+        pass
+
+    async def publish(self, subject: str, message: Dict[str, Any]):
+        logger.info(f"Mock publish to {subject}: {message}")
+
+    async def subscribe(self, subject: str, callback: Any):
+        logger.info(f"Mock subscribe to {subject}")
+        return None
+
+    async def request(self, subject: str, message: Dict[str, Any], timeout: float = 1.0):
+        logger.info(f"Mock request to {subject}: {message}")
         return None
