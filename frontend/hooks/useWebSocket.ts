@@ -27,6 +27,7 @@ export function useWebSocket<T>(url: string, options: UseWebSocketOptions<T> = {
     const ws = useRef<WebSocket | null>(null);
     const reconnectTimeout = useRef<NodeJS.Timeout | null>(null);
     const isMounted = useRef(true);
+    const connectRef = useRef<(() => void) | null>(null);
 
     // Stable handlers to avoid effect re-triggering
     const handlersRef = useRef({ onOpen, onClose, onError, onMessage, validator });
@@ -82,9 +83,9 @@ export function useWebSocket<T>(url: string, options: UseWebSocketOptions<T> = {
                 ws.current = null;
                 handlersRef.current.onClose?.();
 
-                // Schedule reconnect
+                // Schedule reconnect using ref to avoid closure issue
                 if (shouldConnect) {
-                    reconnectTimeout.current = setTimeout(connect, reconnectInterval);
+                    reconnectTimeout.current = setTimeout(() => connectRef.current?.(), reconnectInterval);
                 }
             };
 
@@ -99,10 +100,15 @@ export function useWebSocket<T>(url: string, options: UseWebSocketOptions<T> = {
         } catch (e) {
             console.error(`[WS] Connection failed to ${url}:`, e);
             if (shouldConnect && isMounted.current) {
-                reconnectTimeout.current = setTimeout(connect, reconnectInterval);
+                reconnectTimeout.current = setTimeout(() => connectRef.current?.(), reconnectInterval);
             }
         }
     }, [url, shouldConnect, reconnectInterval]);
+
+    // Keep ref in sync with latest connect function
+    useEffect(() => {
+        connectRef.current = connect;
+    }, [connect]);
 
     useEffect(() => {
         isMounted.current = true;

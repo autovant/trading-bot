@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -53,4 +53,6 @@ def save_perps_state(path: Path | str, state: PerpsState) -> None:
         "daily_pnl_by_date": state.daily_pnl_by_date,
         "consecutive_losses": state.consecutive_losses,
     }
-    file_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    file_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+    )

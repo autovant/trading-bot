@@ -14,7 +14,16 @@ from tools.analyze_sweeps import (
 )
 
 
-def _write_summary(tmp_dir: Path, filename: str, metric_value: float, *, symbol: str = "BTCUSDT", config_id: str = "cfg1", metric_name: str = "pnl", num_trades: int = 5):
+def _write_summary(
+    tmp_dir: Path,
+    filename: str,
+    metric_value: float,
+    *,
+    symbol: str = "BTCUSDT",
+    config_id: str = "cfg1",
+    metric_name: str = "pnl",
+    num_trades: int = 5,
+):
     payload = {
         "schema_version": "1.1",
         "sweep_id": "sweep-1",
@@ -42,7 +51,9 @@ def test_basic_aggregation(tmp_path: Path):
         _write_summary(tmp_path, "b.json", 20.0, num_trades=4),
     ]
 
-    payloads = [load_summary_file(p) for p in summaries]
+    payloads = [
+        p for p in (load_summary_file(path) for path in summaries) if p is not None
+    ]
     entries = collect_config_entries(payloads, metric="pnl")
     aggregates = aggregate_configs(entries, metric="pnl")
 
@@ -89,7 +100,17 @@ def test_cli_smoke(tmp_path: Path):
     summary_path = _write_summary(tmp_path, "cli.json", 12.5)
     env = {**os.environ, "PYTHONPATH": str(Path.cwd())}
     result = subprocess.run(
-        [sys.executable, "-m", "tools.analyze_sweeps", "--summaries", str(summary_path), "--metric", "pnl", "--top-n", "5"],
+        [
+            sys.executable,
+            "-m",
+            "tools.analyze_sweeps",
+            "--summaries",
+            str(summary_path),
+            "--metric",
+            "pnl",
+            "--top-n",
+            "5",
+        ],
         capture_output=True,
         text=True,
         env=env,

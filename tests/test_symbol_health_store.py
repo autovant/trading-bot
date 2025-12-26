@@ -41,7 +41,10 @@ def test_is_blocked_and_multiplier(tmp_path):
         blocked_until=blocked_until,
     )
     assert store.is_blocked("SOLUSDT", now=now)
-    assert store.get_effective_size_multiplier("SOLUSDT", warning_size_multiplier=0.5) == 0.0
+    assert (
+        store.get_effective_size_multiplier("SOLUSDT", warning_size_multiplier=0.5)
+        == 0.0
+    )
 
     past_block = _format_iso(now - timedelta(minutes=1))
     store.update_symbol_state(
@@ -51,4 +54,7 @@ def test_is_blocked_and_multiplier(tmp_path):
         blocked_until=past_block,
     )
     assert not store.is_blocked("SOLUSDT", now=now)
-    assert store.get_effective_size_multiplier("SOLUSDT", warning_size_multiplier=0.5) == 0.5
+    assert (
+        store.get_effective_size_multiplier("SOLUSDT", warning_size_multiplier=0.5)
+        == 0.5
+    )

@@ -102,7 +102,7 @@ class TradingSignal(BaseModel):
     stop_loss: float
     take_profit: float
     timestamp: Optional[datetime] = None
-    source: str = "default" # Name of the strategy generating this signal
+    source: str = "default"  # Name of the strategy generating this signal
 
 
 class ConfidenceScore(BaseModel):

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import math
 import logging
-import uuid
 from typing import Optional
 
 from src.exchange import ExchangeClient
@@ -51,12 +49,11 @@ async def enter_long_with_brackets(
     order_link_id: str,
 ) -> dict:
     logger.info(
-        "Entering long %s qty=%.6f tp=%.4f sl=%.4f R:R=%.2f",
+        "Entering long %s qty=%.6f tp=%.4f sl=%.4f",
         symbol,
         qty,
         take_profit,
         stop_loss,
-        (take_profit - stop_loss) / stop_loss if stop_loss > 0 else 0,
     )
     return await client.create_market_with_brackets(
         symbol=symbol,

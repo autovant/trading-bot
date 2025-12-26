@@ -1,8 +1,11 @@
 import unittest
+
 from fastapi.testclient import TestClient
-from src.server import app
-from src.presets import get_preset_strategies
+
+from src.api_server import app
 from src.dynamic_strategy import StrategyConfig
+from src.presets import get_preset_strategies
+
 
 class TestPresets(unittest.TestCase):
     def setUp(self):
@@ -27,6 +30,7 @@ class TestPresets(unittest.TestCase):
         # Check first item structure
         self.assertIn("name", data[0])
         self.assertIn("regime", data[0])
+
 
 if __name__ == "__main__":
     unittest.main()

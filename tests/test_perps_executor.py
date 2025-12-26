@@ -1,5 +1,3 @@
-import pytest
-from unittest.mock import AsyncMock, MagicMock
 from src.engine.perps_executor import risk_position_size, round_quantity
 from src.exchanges.zoomex_v3 import Precision
 
@@ -48,7 +46,7 @@ def test_risk_position_size_zero_inputs():
 
 def test_round_quantity():
     prec = Precision(qty_step=0.01, min_qty=0.1)
-    
+
     assert round_quantity(1.2345, prec) == 1.23
     assert round_quantity(0.05, prec) is None
     assert round_quantity(0.1, prec) == 0.1

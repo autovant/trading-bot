@@ -18,7 +18,7 @@ data:
     signal: 1h
 database:
   backup_interval: 3600
-  path: data/trading.db
+  url: postgresql://tradingbot:tradingbot@localhost:5432/tradingbot
 exchange:
   api_key: ${EXCHANGE_API_KEY}
   base_url: https://api-testnet.bybit.com

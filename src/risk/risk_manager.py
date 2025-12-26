@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import datetime
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
 from src.state.daily_pnl_store import DailyPnlStore
@@ -111,9 +111,11 @@ class RiskManager:
 
     def _load_current_daily_pnl(self) -> float:
         if self.daily_pnl_store and self.account_id:
-            return self.daily_pnl_store.get_pnl(self.account_id, self._current_date_key())
+            return self.daily_pnl_store.get_pnl(
+                self.account_id, self._current_date_key()
+            )
         return 0.0
 
     @staticmethod
     def _current_date_key() -> str:
-        return datetime.datetime.utcnow().strftime("%Y-%m-%d")
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")

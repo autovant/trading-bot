@@ -71,14 +71,23 @@ class FrontendBridge:
 
 
 bridge = FrontendBridge()
-execution_engine = BacktestExecutionEngine(initial_capital=250_000, slippage=0.0002, fee=0.0004)
-strategy_manager = StrategyManager(execution_engine=execution_engine, data_feed=None, publisher=bridge.broadcast_json)
+execution_engine = BacktestExecutionEngine(
+    initial_capital=250_000, slippage=0.0002, fee=0.0004
+)
+strategy_manager = StrategyManager(
+    execution_engine=execution_engine, data_feed=None, publisher=bridge.broadcast_json
+)
 
 strategy_manager.register_strategy(
-    "stat_arb", StatisticalArbitrageStrategy(("BTC/USDT", "ETH/USDT"), z_score_threshold=2.1)
+    "stat_arb",
+    StatisticalArbitrageStrategy(("BTC/USDT", "ETH/USDT"), z_score_threshold=2.1),
 )
-strategy_manager.register_strategy("vol_breakout", VolatilityBreakoutStrategy(symbol="BTC/USDT", lookback=30, k=2.5))
-strategy_manager.register_strategy("ml_skeleton", MLStrategy(model_path="models/lstm.bin"))
+strategy_manager.register_strategy(
+    "vol_breakout", VolatilityBreakoutStrategy(symbol="BTC/USDT", lookback=30, k=2.5)
+)
+strategy_manager.register_strategy(
+    "ml_skeleton", MLStrategy(model_path="models/lstm.bin")
+)
 
 
 @app.websocket("/ws")
@@ -86,7 +95,11 @@ async def websocket_endpoint(websocket: WebSocket):
     await bridge.connect(websocket)
     await websocket.send_text(
         json.dumps(
-            {"type": "status", "strategies": strategy_manager.status(), "equity": execution_engine.initial_capital}
+            {
+                "type": "status",
+                "strategies": strategy_manager.status(),
+                "equity": execution_engine.initial_capital,
+            }
         )
     )
     try:
@@ -104,9 +117,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 try:
                     strategy_manager.set_enabled(name, enabled)
                 except Exception as exc:  # noqa: BLE001
-                    await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+                    await websocket.send_text(
+                        json.dumps({"type": "error", "message": str(exc)})
+                    )
                 else:
-                    await bridge.broadcast_json({"type": "status", "strategies": strategy_manager.status()})
+                    await bridge.broadcast_json(
+                        {"type": "status", "strategies": strategy_manager.status()}
+                    )
             elif action == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
     except WebSocketDisconnect:
@@ -141,6 +158,7 @@ async def market_data_simulator():
 async def startup_event():
     await strategy_manager.start()
     asyncio.create_task(market_data_simulator())
+
 
 dynamic_engine = DynamicStrategyEngine()
 strategy_store = StrategyStore()
@@ -185,8 +203,8 @@ class BacktestRequest(BaseModel):
 
 @app.post("/api/backtest/dynamic")
 async def run_dynamic_backtest(request: BacktestRequest):
-    strategy_dict = request.strategy.dict()
-    opt = request.optimization.dict() if request.optimization else None
+    strategy_dict = request.strategy.model_dump()
+    opt = request.optimization.model_dump() if request.optimization else None
     try:
         result = await dynamic_engine.run_backtest(
             strategy_dict,
@@ -202,7 +220,7 @@ async def run_dynamic_backtest(request: BacktestRequest):
 
 @app.post("/api/strategies")
 async def save_strategy(strategy: StrategyConfig):
-    strategy_id = strategy_store.save(strategy.dict())
+    strategy_id = strategy_store.save(strategy.model_dump())
     return {"id": strategy_id, "name": strategy.name}
 
 

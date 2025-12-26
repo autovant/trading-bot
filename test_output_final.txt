@@ -1,0 +1,53 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.7, pytest-9.0.2, pluggy-1.6.0
+rootdir: C:\Users\Samad\repos\trading-bot
+plugins: anyio-4.11.0, asyncio-1.3.0, mock-3.15.1
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 160 items
+
+test_integration.py .                                                    [  0%]
+test_messaging.py s                                                      [  1%]
+tests\test_analyze_live_trades.py ...                                    [  3%]
+tests\test_analyze_sweeps.py ......                                      [  6%]
+tests\test_api_server.py .....                                           [ 10%]
+tests\test_backtest_data_providers.py ..                                 [ 11%]
+tests\test_backtest_multi_tf_atr.py .                                    [ 11%]
+tests\test_daily_pnl_store.py ..                                         [ 13%]
+tests\test_database_rollup.py .                                          [ 13%]
+tests\test_divergence.py ..                                              [ 15%]
+tests\test_dynamic_engine.py .                                           [ 15%]
+tests\test_dynamic_strategy.py ...                                       [ 17%]
+tests\test_exchange.py ...                                               [ 19%]
+tests\test_fetch_history.py ..                                           [ 20%]
+tests\test_health_check_configs.py .....                                 [ 23%]
+tests\test_indicators.py ......                                          [ 27%]
+tests\test_indicators_new.py ....                                        [ 30%]
+tests\test_live_best_configs_integration.py ...                          [ 31%]
+tests\test_multi_strategy.py .                                           [ 32%]
+tests\test_order_id_generator.py ........                                [ 37%]
+tests\test_paper_broker.py ...                                           [ 39%]
+tests\test_perps_executor.py .....                                       [ 42%]
+tests\test_perps_service.py ........                                     [ 47%]
+tests\test_perps_service_runtime_health.py ...                           [ 49%]
+tests\test_perps_state_store.py ...                                      [ 51%]
+tests\test_perps_trend_atr_multi_tf.py .....                             [ 54%]
+tests\test_pnl_tracker.py ............                                   [ 61%]
+tests\test_presets.py ..                                                 [ 63%]
+tests\test_risk_manager.py ....                                          [ 65%]
+tests\test_risk_position_size.py ......                                  [ 69%]
+tests\test_run_bot_health_integration.py ...                             [ 71%]
+tests\test_run_bot_runtime_health.py ..                                  [ 72%]
+tests\test_safety_scenarios.py .........                                 [ 78%]
+tests\test_strategy.py ................                                  [ 88%]
+tests\test_strategy_sweep.py ....                                        [ 90%]
+tests\test_symbol_health_store.py ...                                    [ 92%]
+tests\test_trade_logger.py ...                                           [ 94%]
+tests\test_zoomex_client.py .........                                    [100%]
+
+============================== warnings summary ===============================
+tests/test_api_server.py: 11 warnings
+  C:\Users\Samad\repos\trading-bot\venv\Lib\site-packages\aiohttp\connector.py:963: DeprecationWarning: enable_cleanup_closed ignored because https://github.com/python/cpython/pull/118960 is fixed in Python version sys.version_info(major=3, minor=13, micro=7, releaselevel='final', serial=0)
+    super().__init__(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========== 159 passed, 1 skipped, 11 warnings in 92.27s (0:01:32) ============

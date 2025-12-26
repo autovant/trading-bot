@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import React, { createContext, useContext, useEffect, useState, useMemo, ReactNode } from 'react';
 import { SystemStatus } from '@/types';
 import { useMarketData } from './MarketDataContext';
 import { useAccount } from './AccountContext';
@@ -15,27 +15,21 @@ export const SystemStatusProvider: React.FC<{ children: ReactNode }> = ({ childr
     const { isConnected: isMarketConnected } = useMarketData();
     const { isConnected: isAccountConnected } = useAccount();
 
-    const [status, setStatus] = useState<SystemStatus>({
-        status: 'ok',
-        message: 'System Operational',
-        latency_ms: 0,
+    const [latencyMs, setLatencyMs] = useState(0);
+
+    // Derive connection status directly (no effect needed)
+    const connected = isMarketConnected && isAccountConnected;
+    const derivedStatus: SystemStatus['status'] = connected ? 'ok' : 'error';
+    const derivedMessage = connected ? 'System Operational' : 'Connection Lost';
+
+    // Memoize final status object
+    const status = useMemo<SystemStatus>(() => ({
+        status: derivedStatus,
+        message: derivedMessage,
+        latency_ms: latencyMs,
         last_updated: new Date().toISOString(),
-        connected: false
-    });
-
-    useEffect(() => {
-        const connected = isMarketConnected && isAccountConnected;
-        const newStatus: SystemStatus['status'] = connected ? 'ok' : 'error';
-        const message = connected ? 'System Operational' : 'Connection Lost';
-
-        setStatus(prev => ({
-            ...prev,
-            status: newStatus,
-            message,
-            connected,
-            last_updated: new Date().toISOString()
-        }));
-    }, [isMarketConnected, isAccountConnected]);
+        connected
+    }), [derivedStatus, derivedMessage, latencyMs, connected]);
 
     // Poll /health endpoint for backend status
     useEffect(() => {
@@ -45,12 +39,9 @@ export const SystemStatusProvider: React.FC<{ children: ReactNode }> = ({ childr
                 const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/health`);
                 const end = Date.now();
                 if (res.ok) {
-                    setStatus(prev => ({
-                        ...prev,
-                        latency_ms: end - start
-                    }));
+                    setLatencyMs(end - start);
                 }
-            } catch (e) {
+            } catch {
                 // Ignore fetch errors here, relying on WS status for main connection state
             }
         }, 5000);

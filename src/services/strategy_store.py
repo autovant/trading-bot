@@ -23,14 +23,14 @@ class StrategyService:
         strategy = Strategy(
             name=name,
             config=config,
-            is_active=False  # Default to inactive
+            is_active=False,  # Default to inactive
         )
         # Check if exists to update? DatabaseManager.create_strategy inserts.
         # DatabaseManager.update_strategy updates.
         # We should probably check if it exists or use upsert logic if we want to overwrite by name.
         # The current create_strategy does INSERT.
         # The current update_strategy does UPDATE.
-        
+
         existing = await self.database.get_strategy(name)
         if existing:
             strategy.id = existing.id
@@ -67,10 +67,32 @@ class StrategyService:
         strategy = await self.database.get_strategy(name)
         if not strategy:
             return False
-        
+
         strategy.is_active = True
         return await self.database.update_strategy(strategy)
 
     async def delete_strategy(self, name: str) -> bool:
         """Delete a strategy."""
         return await self.database.delete_strategy(name)
+
+
+class StrategyStore:
+    """In-memory strategy store for lightweight UI/API usage."""
+
+    def __init__(self) -> None:
+        self._strategies: Dict[int, Dict[str, Any]] = {}
+        self._next_id = 1
+
+    def save(self, config: Dict[str, Any]) -> int:
+        strategy_id = self._next_id
+        self._next_id += 1
+        record = dict(config)
+        record["id"] = strategy_id
+        self._strategies[strategy_id] = record
+        return strategy_id
+
+    def list(self) -> List[Dict[str, Any]]:
+        return list(self._strategies.values())
+
+    def get(self, strategy_id: int) -> Optional[Dict[str, Any]]:
+        return self._strategies.get(strategy_id)

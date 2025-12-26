@@ -3,23 +3,23 @@ Main trading engine with hot-reload configuration support.
 """
 
 import asyncio
+import logging
 import signal
 import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, cast
-import logging
 
 from prometheus_client import start_http_server
 
-from .config import TradingBotConfig, reload_config, get_config
-from .strategy import TradingStrategy
-from .exchange import ExchangeClient, Mode
+from .config import TradingBotConfig, get_config, reload_config
 from .database import DatabaseManager
+from .exchange import ExchangeClient, Mode
 from .messaging import MessagingClient
 from .metrics import TRADING_MODE
 from .paper_trader import PaperBroker
+from .strategy import TradingStrategy
 
 # Configure logging
 logging.basicConfig(

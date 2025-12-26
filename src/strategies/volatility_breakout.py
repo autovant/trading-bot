@@ -16,7 +16,9 @@ class VolatilityBreakoutStrategy(IStrategy):
     Bollinger/ATR breakout with simple stateful position management.
     """
 
-    def __init__(self, symbol: str, lookback: int = 20, k: float = 2.0, atr_window: int = 14):
+    def __init__(
+        self, symbol: str, lookback: int = 20, k: float = 2.0, atr_window: int = 14
+    ):
         self.symbol = symbol
         self.lookback = lookback
         self.k = k
@@ -56,18 +58,32 @@ class VolatilityBreakoutStrategy(IStrategy):
             if price > upper_band:
                 orders.append(self._market_order(Side.BUY, market_data))
                 self.current_position = Side.BUY
-                logger.info("Vol breakout LONG %s @%.2f (band %.2f)", self.symbol, price, upper_band)
+                logger.info(
+                    "Vol breakout LONG %s @%.2f (band %.2f)",
+                    self.symbol,
+                    price,
+                    upper_band,
+                )
             elif price < lower_band:
                 orders.append(self._market_order(Side.SELL, market_data))
                 self.current_position = Side.SELL
-                logger.info("Vol breakout SHORT %s @%.2f (band %.2f)", self.symbol, price, lower_band)
+                logger.info(
+                    "Vol breakout SHORT %s @%.2f (band %.2f)",
+                    self.symbol,
+                    price,
+                    lower_band,
+                )
         else:
             # exit on mean reversion or ATR stop
             mid = sma
-            if self.current_position == Side.BUY and (price < mid or price < (upper_band - 1.5 * atr)):
+            if self.current_position == Side.BUY and (
+                price < mid or price < (upper_band - 1.5 * atr)
+            ):
                 orders.append(self._market_order(Side.SELL, market_data))
                 self.current_position = None
-            elif self.current_position == Side.SELL and (price > mid or price > (lower_band + 1.5 * atr)):
+            elif self.current_position == Side.SELL and (
+                price > mid or price > (lower_band + 1.5 * atr)
+            ):
                 orders.append(self._market_order(Side.BUY, market_data))
                 self.current_position = None
 

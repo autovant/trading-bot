@@ -1,1 +1,6 @@
-{}
+{
+  "tests/test_api_server.py::TestClient": true,
+  "tests/test_presets.py::TestClient": true,
+  "tests/test_presets.py::TestPresets": true,
+  "tests/test_api_resilience.py::TestClient": true
+}

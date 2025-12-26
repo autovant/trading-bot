@@ -11,15 +11,15 @@ import asyncio
 import logging
 import math
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI
 
 from ..config import TradingBotConfig, load_config
 from ..database import DatabaseManager
-from ..metrics import CIRCUIT_BREAKERS
 from ..messaging import MessagingClient
+from ..metrics import CIRCUIT_BREAKERS
 from .base import BaseService, create_app
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,9 @@ class RiskService(BaseService):
 
         self.database = DatabaseManager(self.config.database.path)
         await self.database.initialize()
-        self._run_id = f"{self.name}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        self._run_id = (
+            f"{self.name}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        )
 
         self.messaging = MessagingClient({"servers": self.config.messaging.servers})
         await self.messaging.connect()
@@ -68,14 +70,15 @@ class RiskService(BaseService):
             self.database = None
 
     async def _run(self) -> None:
-        assert self.config and self.messaging
+        if self.config is None or self.messaging is None:
+            raise RuntimeError("RiskService started before initialisation")
         subject = self.config.messaging.subjects["risk"]
 
         consecutive_losses = 0
         crisis = False
 
         while True:
-            drawdown = abs(math.sin(datetime.utcnow().timestamp())) * 0.2
+            drawdown = abs(math.sin(datetime.now(timezone.utc).timestamp())) * 0.2
             volatility = random.random()
             position_factor = 1 - random.random() * 0.3
 
@@ -92,7 +95,7 @@ class RiskService(BaseService):
                 "drawdown": drawdown,
                 "volatility": volatility,
                 "position_size_factor": position_factor,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
             await self.messaging.publish(subject, payload)

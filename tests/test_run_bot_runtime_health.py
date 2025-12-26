@@ -20,7 +20,9 @@ class DummyPerpsService:
         self.warning_size_multiplier = warning_size_multiplier
 
     async def run_cycle(self):
-        if self.symbol_health_store and self.symbol_health_store.is_blocked(self.config.symbol):
+        if self.symbol_health_store and self.symbol_health_store.is_blocked(
+            self.config.symbol
+        ):
             return
         self.attempts += 1
 
@@ -94,7 +96,10 @@ def test_runtime_health_monitor_starts(monkeypatch, tmp_path):
     assert calls["best_path"] == runtime_settings["best_configs_path"]
     assert calls["trades_path"] == runtime_settings["trades_csv"]
     assert bot.perps_service.symbol_health_store is bot.symbol_health_store
-    assert bot.perps_service.warning_size_multiplier == runtime_settings["warning_size_multiplier"]
+    assert (
+        bot.perps_service.warning_size_multiplier
+        == runtime_settings["warning_size_multiplier"]
+    )
     assert calls["skip_if_unchanged_trades"] is True
     assert calls["cooldown_backoff_multiplier"] == 2.0
 

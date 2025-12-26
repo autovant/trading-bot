@@ -1,43 +1,38 @@
 from __future__ import annotations
 
-import logging
-import os
 import asyncio
-from datetime import datetime, timezone, timedelta
+import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import aiohttp
 import pandas as pd
 
 from src.alerts.base import AlertSink
 from src.alerts.logging_sink import LoggingAlertSink
-from src.config import PerpsConfig, TradingConfig, CrisisModeConfig
-from src.exchanges.zoomex_v3 import ZoomexV3Client, ZoomexError
-from src.exchanges.zoomex_v3 import ZoomexV3Client, ZoomexError
-from src.strategies.perps_trend_vwap import compute_signals
-from src.strategies.perps_trend_atr_multi_tf import compute_signals_multi_tf
+from src.app_logging.trade_logger import TradeLogger
+from src.config import CrisisModeConfig, PerpsConfig, TradingConfig
+from src.engine.order_id_generator import generate_order_id
 from src.engine.perps_executor import (
+    early_exit_reduce_only,
+    enter_long_with_brackets,
     risk_position_size,
     round_quantity,
-    enter_long_with_brackets,
-    early_exit_reduce_only,
 )
 from src.engine.pnl_tracker import PnLTracker
-from src.engine.order_id_generator import generate_order_id
-from src.app_logging.trade_logger import TradeLogger
+from src.exchange import ExchangeClient
+from src.exchanges.zoomex_v3 import ZoomexError
 from src.risk.risk_manager import RiskManager
-from src.state.symbol_health_store import SymbolHealthStore
 from src.state.perps_state_store import (
-    PerpsState,
     load_perps_state,
     save_perps_state,
 )
+from src.state.symbol_health_store import SymbolHealthStore
+from src.strategies.perps_trend_atr_multi_tf import compute_signals_multi_tf
+from src.strategies.perps_trend_vwap import compute_signals
 
 logger = logging.getLogger(__name__)
 
-
-from src.exchange import ExchangeClient
 
 class PerpsService:
     def __init__(
@@ -75,7 +70,9 @@ class PerpsService:
         self.symbol_health_store = symbol_health_store
         self.warning_size_multiplier = warning_size_multiplier
         self.strategy_name = (
-            "perps_trend_atr_multi_tf" if self.config.useMultiTfAtrStrategy else "perps_trend_vwap"
+            "perps_trend_atr_multi_tf"
+            if self.config.useMultiTfAtrStrategy
+            else "perps_trend_vwap"
         )
         self.last_entry_time: Optional[datetime] = None
         self.last_entry_price: Optional[float] = None
@@ -120,7 +117,7 @@ class PerpsService:
 
         if self.risk_manager:
             self.risk_manager.update_equity(self.equity_usdt)
-        
+
         await self._reconcile_positions()
         self._load_persisted_state()
         self.session_start_time = datetime.now(timezone.utc)
@@ -132,6 +129,7 @@ class PerpsService:
             self.config.useTestnet,
             self.equity_usdt,
         )
+
     async def run_cycle(self):
         if not self.config.enabled or not self.exchange:
             return
@@ -154,13 +152,17 @@ class PerpsService:
 
             tasks = [
                 self.exchange.get_historical_data(
-                    symbol=self.config.symbol, timeframe=self.config.interval, limit=ltf_limit
+                    symbol=self.config.symbol,
+                    timeframe=self.config.interval,
+                    limit=ltf_limit,
                 )
             ]
             htf_interval_delta: Optional[timedelta] = None
 
             if self.config.useMultiTfAtrStrategy:
-                htf_interval_delta = self._resolve_interval_delta(self.config.htfInterval)
+                htf_interval_delta = self._resolve_interval_delta(
+                    self.config.htfInterval
+                )
                 tasks.append(
                     self.exchange.get_historical_data(
                         symbol=self.config.symbol,
@@ -173,7 +175,7 @@ class PerpsService:
             df = results[0]
             htf_df = results[1] if len(results) > 1 else None
 
-            if df.empty or len(df) < 35:
+            if df is None or df.empty or len(df) < 35:
                 logger.warning("Insufficient klines data")
                 return
 
@@ -204,10 +206,7 @@ class PerpsService:
 
             self.last_candle_time = last_closed_time
 
-            if (
-                self.config.useMultiTfAtrStrategy
-                and self.current_position_qty > 0
-            ):
+            if self.config.useMultiTfAtrStrategy and self.current_position_qty > 0:
                 if await self._manage_open_position_strategy(closed_df, signals):
                     return
                 if self.current_position_qty > 0:
@@ -261,7 +260,8 @@ class PerpsService:
                 await self._enter_long(
                     signals["price"],
                     stop_price=signals["price"] * (1 - self.config.stopLossPct),
-                    take_profit_price=signals["price"] * (1 + self.config.takeProfitPct),
+                    take_profit_price=signals["price"]
+                    * (1 + self.config.takeProfitPct),
                     stop_loss_pct=self.config.stopLossPct,
                     risk_pct=self.config.riskPct,
                     entry_bar_time=last_closed_time.to_pydatetime(),
@@ -282,10 +282,11 @@ class PerpsService:
                 {"symbol": self.config.symbol},
             )
 
-
-
     async def _check_early_exit(self, signals: dict):
-        if signals.get("prev_fast", 0) > signals.get("prev_slow", 0) and signals["fast"] < signals["slow"]:
+        if (
+            signals.get("prev_fast", 0) > signals.get("prev_slow", 0)
+            and signals["fast"] < signals["slow"]
+        ):
             logger.info(
                 "Bear cross detected, initiating reduce-only exit for %s qty=%.6f",
                 self.config.symbol,
@@ -387,19 +388,23 @@ class PerpsService:
                     position_idx=self.config.positionIdx,
                     order_link_id=order_link_id,
                 )
-                logger.info("Submitted reduce-only exit for %s qty=%.6f", self.config.symbol, self.current_position_qty)
+                logger.info(
+                    "Submitted reduce-only exit for %s qty=%.6f",
+                    self.config.symbol,
+                    self.current_position_qty,
+                )
             except Exception as e:
                 logger.error("Failed to close position during halt: %s", e)
-        
+
         # 3. Reset state
         self.current_position_qty = 0.0
         self.entry_bar_time = None
-        self.reconciliation_block_active = True # Block new entries until manual reset
-        
+        self.reconciliation_block_active = True  # Block new entries until manual reset
+
         await self.alert_sink.send_alert(
             "emergency_halt",
             "Bot halted. Orders cancelled and positions closed.",
-            {"symbol": self.config.symbol}
+            {"symbol": self.config.symbol},
         )
 
     def _resolve_interval_delta(self, interval: str) -> timedelta:
@@ -407,7 +412,9 @@ class PerpsService:
             minutes = max(int(interval), 1)
         except ValueError:
             minutes = 5
-            logger.warning("Invalid perps interval '%s', defaulting to 5 minutes", interval)
+            logger.warning(
+                "Invalid perps interval '%s', defaulting to 5 minutes", interval
+            )
         return timedelta(minutes=minutes)
 
     def _closed_candle_view(
@@ -451,11 +458,15 @@ class PerpsService:
     def _build_trade_log_entry(
         self, trade: Dict[str, Any], trade_time: datetime, pnl: float
     ) -> Dict[str, Any]:
-        qty = self._safe_float(trade.get("qty") or trade.get("size") or trade.get("closedSize"))
+        qty = self._safe_float(
+            trade.get("qty") or trade.get("size") or trade.get("closedSize")
+        )
         if qty is None:
             qty = self.last_entry_qty
 
-        entry_price = self._safe_float(trade.get("avgEntryPrice") or trade.get("orderPrice"))
+        entry_price = self._safe_float(
+            trade.get("avgEntryPrice") or trade.get("orderPrice")
+        )
         if entry_price is None:
             entry_price = self.last_entry_price
 
@@ -464,11 +475,15 @@ class PerpsService:
         notional = self._safe_float(trade.get("cumEntryValue"))
         if notional is None and entry_price is not None and qty is not None:
             notional = entry_price * abs(qty)
-        if notional is None and self.last_entry_price is not None and self.last_entry_qty is not None:
+        if (
+            notional is None
+            and self.last_entry_price is not None
+            and self.last_entry_qty is not None
+        ):
             notional = self.last_entry_price * abs(self.last_entry_qty)
 
         realized_pnl_pct: Optional[float] = None
-        if notional not in (None, 0):
+        if notional is not None and notional != 0:
             realized_pnl_pct = pnl / notional
 
         timestamp_open = (
@@ -513,17 +528,17 @@ class PerpsService:
             # We should probably add a helper in ExchangeClient or parse it here.
             # PaperBroker returns {'equity': ...}
             # CCXT returns standard structure.
-            
+
             # Let's try to get equity safely
             # Try to get equity safely
-            if 'totalMarginBalance' in balance:
-                self.equity_usdt = float(balance['totalMarginBalance'])
-            elif 'totalWalletBalance' in balance:
-                self.equity_usdt = float(balance['totalWalletBalance'])
-            elif 'equity' in balance:
-                self.equity_usdt = float(balance['equity'])
-            elif 'total' in balance:
-                self.equity_usdt = float(balance.get('total', {}).get('USDT', 0.0))
+            if "totalMarginBalance" in balance:
+                self.equity_usdt = float(balance["totalMarginBalance"])
+            elif "totalWalletBalance" in balance:
+                self.equity_usdt = float(balance["totalWalletBalance"])
+            elif "equity" in balance:
+                self.equity_usdt = float(balance["equity"])
+            elif "total" in balance:
+                self.equity_usdt = float(balance.get("total", {}).get("USDT", 0.0))
             else:
                 self.equity_usdt = 0.0
 
@@ -551,7 +566,9 @@ class PerpsService:
             logger.warning("Wallet equity unavailable; skipping entry")
             return
 
-        if self.symbol_health_store and self.symbol_health_store.is_blocked(self.config.symbol):
+        if self.symbol_health_store and self.symbol_health_store.is_blocked(
+            self.config.symbol
+        ):
             state = self.symbol_health_store.get_symbol_state(self.config.symbol)
             reasons = ", ".join(state.get("last_reasons", [])) or "unspecified"
             logger.warning(
@@ -574,7 +591,7 @@ class PerpsService:
                 self.config.symbol,
                 self.config.positionIdx,
             )
-        
+
         if margin_ratio > self.config.maxMarginRatio:
             logger.warning(
                 "SAFETY_MARGIN_BLOCK: Margin ratio %.2f%% exceeds limit %.2f%%, skipping entry",
@@ -686,7 +703,11 @@ class PerpsService:
                 self.last_risk_blocked = True
                 return
 
-        tp_price = take_profit_price if take_profit_price else price * (1 + self.config.takeProfitPct)
+        tp_price = (
+            take_profit_price
+            if take_profit_price
+            else price * (1 + self.config.takeProfitPct)
+        )
         sl_price = effective_stop_price
         risk_reward = (
             (tp_price - price) / (price - sl_price) if price != sl_price else 0
@@ -727,7 +748,11 @@ class PerpsService:
         self.last_risk_blocked = False
         self.session_trades += 1
         self.entry_bar_time = entry_bar_time
-        logger.info("Order placed: %s (order_link_id=%s)", result.get("orderId", "N/A"), order_link_id)
+        logger.info(
+            "Order placed: %s (order_link_id=%s)",
+            result.get("orderId", "N/A"),
+            order_link_id,
+        )
         if self.risk_manager:
             self.risk_manager.register_open_position(
                 self.config.symbol, proposed_notional, risk_pct
@@ -737,65 +762,114 @@ class PerpsService:
     async def _reconcile_positions(self) -> None:
         if not self.exchange:
             return
-        
+
         try:
-            positions_data = await self.exchange.get_positions(symbols=[self.config.symbol])
-            if "list" not in positions_data:
+            positions_data: Any = await self.exchange.get_positions(
+                symbols=[self.config.symbol]
+            )
+            if isinstance(positions_data, dict):
+                positions = positions_data.get("list") or []
+            else:
+                positions = positions_data or []
+
+            if not positions:
                 logger.info("No existing positions found for %s", self.config.symbol)
                 return
-            
-            for pos in positions_data["list"]:
-                if pos.get("positionIdx") == self.config.positionIdx:
-                    size = abs(float(pos.get("size", "0")))
-                    if size > 0:
-                        self.current_position_qty = size
-                        entry_price = float(pos.get("avgPrice", "0"))
-                        unrealized_pnl = float(pos.get("unrealisedPnl", "0"))
-                        side = (
-                            pos.get("side")
-                            or pos.get("positionSide")
-                            or "UNKNOWN"
-                        )
-                        
-                        logger.warning(
-                            "SAFETY_RECON_ADOPT: Adopted existing position for %s | "
-                            "Qty=%.6f | Entry=$%.4f | Unrealized PnL=$%.2f | Side=%s",
-                            self.config.symbol,
-                            size,
-                            entry_price,
-                            unrealized_pnl,
-                            side,
-                        )
-                        logger.warning(
-                            "SAFETY_RECON_ADOPT: Existing open position detected on startup; PnL tracking may be inaccurate "
-                            "until the exchange position is closed."
-                        )
-                        if self.risk_manager:
-                            adopted_notional = entry_price * size if entry_price else size
-                            self.risk_manager.register_open_position(
-                                self.config.symbol, adopted_notional, self.config.riskPct
-                            )
-                            self.risk_manager.update_equity(self.equity_usdt)
-                        normalized_side = side.lower()
-                        if normalized_side in ("sell", "short"):
-                            self.reconciliation_block_active = True
-                            logger.warning(
-                                "SAFETY_RECON_BLOCK: Reconciliation guard activated due to %s exposure. "
-                                "New entries will be blocked until manual intervention.",
-                                side,
-                            )
-                            await self.alert_sink.send_alert(
-                                "safety_reconciliation",
-                                f"Exchange reported {side} exposure; guard enabled.",
-                                {
-                                    "symbol": self.config.symbol,
-                                    "exposure_side": side,
-                                    "quantity": size,
-                                },
-                            )
-                        return
-            
-            logger.info("No open position found for %s during reconciliation", self.config.symbol)
+
+            selected = None
+            for pos in positions:
+                pos_idx = (
+                    pos.get("positionIdx")
+                    if isinstance(pos, dict)
+                    else getattr(pos, "positionIdx", None)
+                )
+                if pos_idx is not None and pos_idx != self.config.positionIdx:
+                    continue
+
+                side_value = (
+                    (pos.get("side") or pos.get("positionSide") or "")
+                    if isinstance(pos, dict)
+                    else (getattr(pos, "side", "") or "")
+                )
+                side_norm = str(side_value).lower()
+                if self.config.positionIdx == 1 and side_norm not in ("buy", "long"):
+                    continue
+                if self.config.positionIdx == 2 and side_norm not in ("sell", "short"):
+                    continue
+
+                size_value = (
+                    pos.get("size", "0")
+                    if isinstance(pos, dict)
+                    else getattr(pos, "size", 0.0)
+                )
+                size = abs(float(size_value or 0.0))
+                if size <= 0:
+                    continue
+
+                selected = pos
+                break
+
+            if selected is None:
+                logger.info(
+                    "No open position found for %s during reconciliation",
+                    self.config.symbol,
+                )
+                return
+
+            self.current_position_qty = size
+            entry_price = (
+                float(selected.get("avgPrice", "0"))
+                if isinstance(selected, dict)
+                else float(selected.entry_price)
+            )
+            unrealized_pnl = (
+                float(selected.get("unrealisedPnl", "0"))
+                if isinstance(selected, dict)
+                else float(selected.unrealized_pnl)
+            )
+            side = (
+                str(selected.get("side") or selected.get("positionSide") or "UNKNOWN")
+                if isinstance(selected, dict)
+                else str(selected.side or "UNKNOWN")
+            )
+
+            logger.warning(
+                "SAFETY_RECON_ADOPT: Adopted existing position for %s | "
+                "Qty=%.6f | Entry=$%.4f | Unrealized PnL=$%.2f | Side=%s",
+                self.config.symbol,
+                size,
+                entry_price,
+                unrealized_pnl,
+                side,
+            )
+            logger.warning(
+                "SAFETY_RECON_ADOPT: Existing open position detected on startup; PnL tracking may be inaccurate "
+                "until the exchange position is closed."
+            )
+            if self.risk_manager:
+                adopted_notional = entry_price * size if entry_price else size
+                self.risk_manager.register_open_position(
+                    self.config.symbol, adopted_notional, self.config.riskPct
+                )
+                self.risk_manager.update_equity(self.equity_usdt)
+            normalized_side = side.lower()
+            if normalized_side in ("sell", "short"):
+                self.reconciliation_block_active = True
+                logger.warning(
+                    "SAFETY_RECON_BLOCK: Reconciliation guard activated due to %s exposure. "
+                    "New entries will be blocked until manual intervention.",
+                    side,
+                )
+                await self.alert_sink.send_alert(
+                    "safety_reconciliation",
+                    f"Exchange reported {side} exposure; guard enabled.",
+                    {
+                        "symbol": self.config.symbol,
+                        "exposure_side": side,
+                        "quantity": size,
+                    },
+                )
+            return
         except Exception as e:
             logger.error("Position reconciliation failed: %s", e, exc_info=True)
 
@@ -807,7 +881,10 @@ class PerpsService:
             )
             return False
 
-        if self.config.consecutiveLossLimit and self.pnl_tracker.consecutive_losses >= self.config.consecutiveLossLimit:
+        if (
+            self.config.consecutiveLossLimit
+            and self.pnl_tracker.consecutive_losses >= self.config.consecutiveLossLimit
+        ):
             logger.warning(
                 "SAFETY_CIRCUIT_BREAKER: %d consecutive losses (limit=%d)",
                 self.pnl_tracker.consecutive_losses,
@@ -891,8 +968,8 @@ class PerpsService:
 
         if self.config.sessionMaxRuntimeMinutes:
             elapsed_minutes = (
-                (datetime.now(timezone.utc) - self.session_start_time).total_seconds() / 60.0
-            )
+                datetime.now(timezone.utc) - self.session_start_time
+            ).total_seconds() / 60.0
             if elapsed_minutes > self.config.sessionMaxRuntimeMinutes:
                 logger.warning(
                     "SAFETY_SESSION_RUNTIME: Session runtime %.1f minutes exceeded limit=%d; "
@@ -907,7 +984,10 @@ class PerpsService:
                 )
                 return False
 
-        if self.config.sessionMaxTrades is not None and self.session_trades >= self.config.sessionMaxTrades:
+        if (
+            self.config.sessionMaxTrades is not None
+            and self.session_trades >= self.config.sessionMaxTrades
+        ):
             logger.warning(
                 "SAFETY_SESSION_TRADES: Session trades=%d reached limit=%d; "
                 "halting new entries for this run.",
@@ -941,33 +1021,51 @@ class PerpsService:
                 start_time=start_time,
                 limit=10,
             )
-            
-            if "list" in closed_pnl_data and closed_pnl_data["list"]:
-                for trade in closed_pnl_data["list"]:
-                    pnl = float(trade.get("closedPnl", "0"))
-                    trade_time = self._parse_timestamp_value(trade.get("createdTime"))
-                    if not trade_time:
-                        logger.debug("Skipping closed PnL row with missing timestamp: %s", trade)
-                        continue
-                    
-                    already_recorded = any(
-                        t["timestamp"] == trade_time for t in self.pnl_tracker.trade_history
+
+            trades: Any = closed_pnl_data
+            if isinstance(trades, dict):
+                trades = trades.get("list") or []
+
+            for trade in trades:
+                pnl = (
+                    self._safe_float(
+                        trade.get("closedPnl")
+                        or trade.get("pnl")
+                        or trade.get("profit")
                     )
-                    
-                    if not already_recorded:
-                        self.pnl_tracker.record_trade(pnl, trade_time)
-                        if self.risk_manager:
-                            self.risk_manager.register_close_position(self.config.symbol, pnl)
-                            self.risk_manager.update_equity(self.equity_usdt)
-                        if self.trade_logger:
-                            trade_info = self._build_trade_log_entry(trade, trade_time, pnl)
-                            self.trade_logger.log_completed_trade(trade_info)
-                            self.last_entry_time = None
-                            self.last_entry_price = None
-                            self.last_entry_qty = None
-                            self.entry_equity = None
-                            self.last_risk_blocked = None
-                        self._persist_state()
+                    or 0.0
+                )
+                trade_time = self._parse_timestamp_value(
+                    trade.get("createdTime")
+                    or trade.get("timestamp")
+                    or trade.get("time")
+                )
+                if not trade_time:
+                    logger.debug(
+                        "Skipping closed PnL row with missing timestamp: %s", trade
+                    )
+                    continue
+
+                already_recorded = any(
+                    t["timestamp"] == trade_time for t in self.pnl_tracker.trade_history
+                )
+
+                if not already_recorded:
+                    self.pnl_tracker.record_trade(pnl, trade_time)
+                    if self.risk_manager:
+                        self.risk_manager.register_close_position(
+                            self.config.symbol, pnl
+                        )
+                        self.risk_manager.update_equity(self.equity_usdt)
+                    if self.trade_logger:
+                        trade_info = self._build_trade_log_entry(trade, trade_time, pnl)
+                        self.trade_logger.log_completed_trade(trade_info)
+                        self.last_entry_time = None
+                        self.last_entry_price = None
+                        self.last_entry_qty = None
+                        self.entry_equity = None
+                        self.last_risk_blocked = None
+                    self._persist_state()
 
             if self.pnl_tracker.update_peak_equity(self.equity_usdt):
                 self._persist_state()

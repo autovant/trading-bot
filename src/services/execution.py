@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
@@ -68,7 +68,7 @@ class ExecutionService(BaseService):
             config=self.config.paper,
             database=self.database,
             mode=self.config.app_mode,
-            run_id=f"exec-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+            run_id=f"exec-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
             initial_balance=self.config.trading.initial_capital,
             risk_config=self.config.risk_management,
             execution_listener=self._publish_execution_report,
@@ -171,7 +171,7 @@ class ExecutionService(BaseService):
                 "executed": False,
                 "mode": self.config.app_mode,
                 "run_id": self.broker.run_id if self.broker else "",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "order_type": order.order_type,
                 "stop_price": order.stop_price,
                 "price": order.price,
@@ -195,7 +195,7 @@ class ExecutionService(BaseService):
                     "symbol": payload.get("symbol"),
                     "executed": False,
                     "error": str(exc),
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "mode": self.config.app_mode if self.config else "paper",
                 },
             )
@@ -211,9 +211,9 @@ class ExecutionService(BaseService):
                 try:
                     ts = datetime.fromisoformat(timestamp)
                 except ValueError:
-                    ts = datetime.utcnow()
+                    ts = datetime.now(timezone.utc)
             else:
-                ts = datetime.utcnow()
+                ts = datetime.now(timezone.utc)
 
             snapshot = MarketSnapshot(
                 symbol=data["symbol"],

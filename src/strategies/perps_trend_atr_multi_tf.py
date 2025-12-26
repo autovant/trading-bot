@@ -12,7 +12,7 @@ from typing import Any, Dict
 import pandas as pd
 
 from src.config import PerpsConfig
-from src.ta_indicators.ta_core import ema, atr, rsi_ema
+from src.ta_indicators.ta_core import atr, ema, rsi_ema
 
 
 def _default_response() -> Dict[str, Any]:
@@ -64,7 +64,6 @@ def compute_signals_multi_tf(
         return response
 
     ltf_closes = ltf_df["close"].astype(float)
-    ltf_highs = ltf_df["high"].astype(float)
     ltf_lows = ltf_df["low"].astype(float)
     htf_closes = htf_df["close"].astype(float)
 
@@ -140,7 +139,9 @@ def compute_signals_multi_tf(
         ]
     )
 
-    stop_distance = max(config.atrStopMultiple * atr_value, close_price * config.hardStopMinPct)
+    stop_distance = max(
+        config.atrStopMultiple * atr_value, close_price * config.hardStopMinPct
+    )
     entry_price = close_price
     stop_price = max(0.0, entry_price - stop_distance)
     tp1_price = entry_price + stop_distance * config.tp1Multiple

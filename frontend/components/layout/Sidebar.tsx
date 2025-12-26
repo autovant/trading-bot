@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { LayoutDashboard, LineChart, Settings, History, Bot, Zap } from "lucide-react";
+import { LayoutDashboard, Settings, History, Bot, Zap } from "lucide-react";
 import { cn } from "@/utils/cn";
 
 import Link from "next/link";

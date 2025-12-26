@@ -10,21 +10,19 @@ fees, funding accrual, and queue dynamics.  All events are persisted through
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
 import logging
 import math
 import random
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, cast
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
 
 from .config import PaperConfig, RiskManagementConfig
 from .database import DatabaseManager, Order, PnLEntry, Position, Trade
 from .metrics import AVERAGE_SLIPPAGE_BPS, MAKER_RATIO, SIGNAL_ACK_LATENCY
 from .models import MarketSnapshot, Mode, OrderType, Side
-
-
 
 
 @dataclass
@@ -75,7 +73,7 @@ class PaperBroker:
         execution_listener: Optional[
             Callable[[Dict[str, Any]], Awaitable[None]]
         ] = None,
-        time_provider: Callable[[], datetime] = datetime.utcnow,
+        time_provider: Optional[Callable[[], datetime]] = None,
     ):
         self.config = config
         self.database = database
@@ -83,7 +81,7 @@ class PaperBroker:
         self.run_id = run_id
         self._balance = initial_balance
         self._execution_listener = execution_listener
-        self._time_provider = time_provider
+        self._time_provider = time_provider or (lambda: datetime.now(timezone.utc))
 
         self._lock = asyncio.Lock()
         self._market_state: Dict[str, MarketSnapshot] = {}
@@ -263,6 +261,38 @@ class PaperBroker:
         for rest, snap in fills:
             await self._fill_resting_limit(rest, snap)
 
+    async def cancel_all_orders(self, symbol: str) -> List[Dict[str, Any]]:
+        """Cancel all open orders for a symbol."""
+        cancelled_orders = []
+
+        async with self._lock:
+            # 1. Cancel Resting Limits
+            resting_list = self._resting_limits.pop(symbol, [])
+            for rest in resting_list:
+                cancelled_orders.append(rest.order)
+
+            # 2. Cancel Stop Orders
+            keys_to_remove = []
+            for key, stop in self._stop_orders.items():
+                if stop.order.symbol == symbol:
+                    cancelled_orders.append(stop.order)
+                    keys_to_remove.append(key)
+
+            for key in keys_to_remove:
+                del self._stop_orders[key]
+
+        # 3. Update Status in DB
+        results = []
+        for order in cancelled_orders:
+            await self.database.update_order_status(
+                order_id=order.order_id or order.client_id,
+                status="canceled",
+                is_shadow=order.is_shadow,
+            )
+            results.append({"orderId": order.order_id, "status": "canceled"})
+
+        return results
+
     async def get_positions(self) -> List[Position]:
         async with self._lock:
             return [
@@ -272,16 +302,17 @@ class PaperBroker:
                     size=abs(state.size),
                     entry_price=state.avg_price,
                     mark_price=self._market_state.get(
-                        symbol, 
+                        symbol,
                         MarketSnapshot(
-                            symbol=symbol, 
-                            best_bid=0, 
-                            best_ask=0, 
-                            bid_size=0, 
-                            ask_size=0, 
+                            symbol=symbol,
+                            best_bid=0,
+                            best_ask=0,
+                            bid_size=0,
+                            ask_size=0,
                             last_price=0,
                             timestamp=self._time_provider()
-                        )
+                            or datetime.now(timezone.utc),
+                        ),
                     ).mid_price,
                     unrealized_pnl=state.unrealized_pnl,
                     percentage=self._position_return_pct(state),

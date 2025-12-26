@@ -16,7 +16,6 @@ from pathlib import Path
 from statistics import mean, median
 from typing import Any, Dict, List, Optional
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -117,7 +116,9 @@ def analyze_trades(
         }
 
     metric_values = [
-        record.realized_pnl_pct if metric_key == "realized_pnl_pct" else record.realized_pnl
+        record.realized_pnl_pct
+        if metric_key == "realized_pnl_pct"
+        else record.realized_pnl
         for record in records
     ]
     wins = sum(1 for value in metric_values if value > 0)

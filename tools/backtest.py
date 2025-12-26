@@ -7,34 +7,30 @@ import asyncio
 import json
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
-from src.config import TradingBotConfig, get_config, PaperConfig
+from src.config import TradingBotConfig, get_config
+from src.database import DatabaseManager
+from src.dynamic_strategy import DynamicStrategyEngine, StrategyConfig
 from src.exchange import ExchangeClient
 from src.indicators import TechnicalIndicators
-from src.strategy import MarketRegime, TradingSetup, TradingSignal
+from src.models import MarketSnapshot, Side
 from src.paper_trader import PaperBroker
-from src.database import DatabaseManager
-from src.models import MarketSnapshot, Side, OrderType
-
-try:
-    from src.dynamic_strategy import DynamicStrategyEngine, StrategyConfig
-except ImportError:
-    DynamicStrategyEngine = None
-    StrategyConfig = None
+from src.strategy import MarketRegime, TradingSetup, TradingSignal
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 class VirtualClock:
     def __init__(self):
-        self._current_time = datetime.utcnow()
+        self._current_time = datetime.now(timezone.utc)
 
     def set_time(self, dt: datetime):
         self._current_time = dt
@@ -42,36 +38,39 @@ class VirtualClock:
     def now(self) -> datetime:
         return self._current_time
 
+
 class BacktestEngine:
-    def __init__(self, config: TradingBotConfig, strategy_config: Optional[StrategyConfig] = None):
+    def __init__(
+        self, config: TradingBotConfig, strategy_config: Optional[StrategyConfig] = None
+    ):
         self.config = config
         self.strategy_config = strategy_config
         self.indicators = TechnicalIndicators()
-        
+
         # Initialize dynamic engine if config is provided
-        self.dynamic_engine = None
-        if self.strategy_config and DynamicStrategyEngine:
+        self.dynamic_engine: Optional[DynamicStrategyEngine] = None
+        if self.strategy_config:
             self.dynamic_engine = DynamicStrategyEngine(self.strategy_config)
-            
+
         self.initial_balance = config.backtesting.initial_balance
 
         self.clock = VirtualClock()
         self.database = DatabaseManager(":memory:")
-        
+
         # Initialize PaperBroker for backtesting
         # We use the config's paper settings but override mode to 'backtest'
         self.broker = PaperBroker(
             config=config.paper,
             database=self.database,
             mode="backtest",
-            run_id=f"backtest_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+            run_id=f"backtest_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
             initial_balance=config.backtesting.initial_balance,
             risk_config=config.risk_management,
-            time_provider=self.clock.now
+            time_provider=self.clock.now,
         )
 
         self.equity_curve: List[Dict] = []
-        
+
         # Performance metrics (will be calculated from DB)
         self.total_trades = 0
         self.winning_trades = 0
@@ -79,7 +78,6 @@ class BacktestEngine:
         self.total_pnl = 0.0
         self.max_drawdown = 0.0
         self.peak_equity = config.backtesting.initial_balance
-
 
     async def run_backtest(self, symbol: str, start_date: str, end_date: str) -> Dict:
         """Run backtest for a symbol over date range."""
@@ -126,6 +124,7 @@ class BacktestEngine:
         except Exception as e:
             logger.error(f"Backtest error: {e}")
             import traceback
+
             traceback.print_exc()
             return {}
         finally:
@@ -214,9 +213,7 @@ class BacktestEngine:
         frame.sort_index(inplace=True)
         return frame
 
-    def _load_local_klines(
-        self, symbol: str, timeframe: str
-    ) -> Optional[pd.DataFrame]:
+    def _load_local_klines(self, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
         """Load historical data from local sample/replay files."""
 
         def _strip_scheme(path_str: str) -> str:
@@ -263,9 +260,7 @@ class BacktestEngine:
         )
         return None
 
-    def _read_local_dataset(
-        self, path: Path, symbol: str
-    ) -> Optional[pd.DataFrame]:
+    def _read_local_dataset(self, path: Path, symbol: str) -> Optional[pd.DataFrame]:
         if not path.exists():
             return None
         try:
@@ -279,16 +274,19 @@ class BacktestEngine:
             logger.warning("Unable to read %s: %s", path, exc)
             return None
 
-        df = self._normalise_dataframe(df)
-        if df is None or df.empty:
+        normalized = self._normalise_dataframe(df)
+        if normalized is None or normalized.empty:
             return None
+        df = normalized
 
         if "symbol" in df.columns:
             df = df[df["symbol"].str.upper() == symbol.upper()]
 
         return df if not df.empty else None
 
-    async def _simulate_trading(self, symbol: str, data: Dict[str, pd.DataFrame], start_date_str: str):
+    async def _simulate_trading(
+        self, symbol: str, data: Dict[str, pd.DataFrame], start_date_str: str
+    ):
         """Simulate trading strategy on historical data."""
         try:
             signal_data = data.get("signal")  # 1h data for simulation
@@ -303,7 +301,7 @@ class BacktestEngine:
             for i in range(max(200, len(signal_data) // 10), len(signal_data)):
                 current_time = signal_data.index[i]
                 self.clock.set_time(current_time)
-                
+
                 # Check if we are within the requested backtest window
                 # (Data includes warmup buffer)
                 start_dt_limit = pd.Timestamp(start_date_str).tz_localize("UTC")
@@ -352,12 +350,12 @@ class BacktestEngine:
                 for price in path:
                     snapshot = MarketSnapshot(
                         symbol=symbol,
-                        best_bid=price - 0.01, # Tight spread approximation
+                        best_bid=price - 0.01,  # Tight spread approximation
                         best_ask=price + 0.01,
                         bid_size=vol / 4,
                         ask_size=vol / 4,
                         last_price=price,
-                        timestamp=current_time
+                        timestamp=current_time,
                     )
                     await self.broker.update_market(snapshot)
                     # Allow broker to process fills
@@ -365,7 +363,7 @@ class BacktestEngine:
 
                 # Analyze market and generate signals (at Close)
                 await self._analyze_market(symbol, current_data, current_time)
-                
+
                 # Allow broker to process any new orders
                 await asyncio.sleep(0)
 
@@ -375,14 +373,15 @@ class BacktestEngine:
                 # Progress logging
                 if i % 100 == 0:
                     progress = (i / len(signal_data)) * 100
-                    balance = (await self.broker.get_account_balance())["totalWalletBalance"]
-                    logger.info(
-                        f"Progress: {progress:.1f}% - Balance: ${balance:.2f}"
-                    )
+                    balance = (await self.broker.get_account_balance())[
+                        "totalWalletBalance"
+                    ]
+                    logger.info(f"Progress: {progress:.1f}% - Balance: ${balance:.2f}")
 
         except Exception as e:
             logger.error(f"Error in trading simulation: {e}")
             import traceback
+
             traceback.print_exc()
 
     async def _analyze_market(
@@ -391,12 +390,14 @@ class BacktestEngine:
         """Analyze market conditions and generate signals."""
         try:
             # 1. Regime Detection
+            regime: Optional[MarketRegime]
             if self.dynamic_engine:
                 regime = self.dynamic_engine.detect_regime(data["regime"])
             else:
                 regime = self._detect_regime(data["regime"])
 
             # 2. Setup Detection
+            setup: Optional[TradingSetup]
             if self.dynamic_engine:
                 setup = self.dynamic_engine.detect_setup(data["setup"])
             else:
@@ -415,18 +416,21 @@ class BacktestEngine:
 
                 for signal in valid_signals:
                     if self.dynamic_engine:
-                        confidence = self.dynamic_engine.calculate_confidence(regime, setup, signal)
+                        confidence_score = self.dynamic_engine.calculate_confidence(
+                            regime, setup, signal
+                        )
+                        confidence_value = confidence_score.total_score
                         threshold = self.dynamic_engine.config.confidence_threshold
-                        if confidence.total_score >= threshold:
-                             await self._execute_signal(
-                                symbol, signal, confidence.total_score, current_time
-                            )
                     else:
-                        confidence = self._calculate_confidence(regime, setup, signal)
-                        if confidence >= self.config.strategy.confidence.min_threshold:
-                            await self._execute_signal(
-                                symbol, signal, confidence, current_time
-                            )
+                        confidence_value = self._calculate_confidence(
+                            regime, setup, signal
+                        )
+                        threshold = self.config.strategy.confidence.min_threshold
+
+                    if confidence_value >= threshold:
+                        await self._execute_signal(
+                            symbol, signal, confidence_value, current_time
+                        )
 
         except Exception as e:
             logger.error(f"Error analyzing market: {e}")
@@ -554,7 +558,6 @@ class BacktestEngine:
                 abs(current_price - current_ema21) / current_ema21 < 0.005
                 and current_rsi < self.config.strategy.signals.rsi_oversold
             ):
-
                 signals.append(
                     TradingSignal(
                         signal_type="pullback",
@@ -634,7 +637,7 @@ class BacktestEngine:
         try:
             # Check current positions
             positions = await self.broker.get_positions()
-            
+
             # Check if we can take new positions
             if len(positions) >= self.config.trading.max_positions:
                 return
@@ -660,19 +663,19 @@ class BacktestEngine:
                 position_size *= 0.7
 
             # Convert direction
-            side = "buy" if signal.direction == "long" else "sell"
-            
+            side: Side = "buy" if signal.direction == "long" else "sell"
+
             # Place Entry Order
             await self.broker.place_order(
                 symbol=symbol,
                 side=side,
                 order_type="market",
                 quantity=position_size,
-                client_id=f"entry-{timestamp.timestamp()}"
+                client_id=f"entry-{timestamp.timestamp()}",
             )
-            
+
             # Place Stop Loss Order
-            stop_side = "sell" if side == "buy" else "buy"
+            stop_side: Side = "sell" if side == "buy" else "buy"
             await self.broker.place_order(
                 symbol=symbol,
                 side=stop_side,
@@ -680,9 +683,9 @@ class BacktestEngine:
                 quantity=position_size,
                 stop_price=signal.stop_loss,
                 reduce_only=True,
-                client_id=f"stop-{timestamp.timestamp()}"
+                client_id=f"stop-{timestamp.timestamp()}",
             )
-            
+
             # Place Take Profit Order (Limit)
             await self.broker.place_order(
                 symbol=symbol,
@@ -691,7 +694,7 @@ class BacktestEngine:
                 quantity=position_size,
                 price=signal.take_profit,
                 reduce_only=True,
-                client_id=f"tp-{timestamp.timestamp()}"
+                client_id=f"tp-{timestamp.timestamp()}",
             )
 
             logger.info(
@@ -701,19 +704,18 @@ class BacktestEngine:
         except Exception as e:
             logger.error(f"Error executing signal: {e}")
             import traceback
+
             traceback.print_exc()
-
-
 
     async def _record_equity(self, timestamp: datetime):
         """Record current equity."""
         balance_info = await self.broker.get_account_balance()
         balance = balance_info["totalWalletBalance"]
-        
+
         # Get unrealized PnL from positions
         positions = await self.broker.get_positions()
         unrealized_pnl = sum(p.unrealized_pnl for p in positions)
-        
+
         total_equity = balance + unrealized_pnl
 
         # Update peak equity and drawdown
@@ -723,7 +725,7 @@ class BacktestEngine:
         current_drawdown = 0.0
         if self.peak_equity > 0:
             current_drawdown = (self.peak_equity - total_equity) / self.peak_equity
-        
+
         if current_drawdown > self.max_drawdown:
             self.max_drawdown = current_drawdown
 
@@ -739,10 +741,10 @@ class BacktestEngine:
 
     async def _calculate_performance(self) -> Dict:
         """Calculate performance metrics."""
-        
+
         # Fetch trades from DB
         trades_models = await self.database.get_trades(run_id=self.broker.run_id)
-        
+
         # Convert to dicts for consistency with legacy format
         trades = []
         for t in trades_models:
@@ -750,7 +752,7 @@ class BacktestEngine:
             # Ensure timestamps are strings
             if isinstance(trade_dict.get("timestamp"), datetime):
                 trade_dict["timestamp"] = trade_dict["timestamp"].isoformat()
-            
+
             # Calculate net_pnl
             trade_dict["net_pnl"] = (
                 trade_dict.get("realized_pnl", 0.0)
@@ -764,7 +766,7 @@ class BacktestEngine:
         self.winning_trades = sum(1 for t in trades if t["net_pnl"] > 0)
         self.losing_trades = sum(1 for t in trades if t["net_pnl"] <= 0)
         self.total_pnl = sum(t["net_pnl"] for t in trades)
-        
+
         balance_info = await self.broker.get_account_balance()
         current_balance = balance_info["totalWalletBalance"]
 
@@ -788,12 +790,8 @@ class BacktestEngine:
         win_rate = (self.winning_trades / self.total_trades) * 100
 
         # Profit factor
-        gross_profit = sum(
-            t["net_pnl"] for t in trades if t["net_pnl"] > 0
-        )
-        gross_loss = abs(
-            sum(t["net_pnl"] for t in trades if t["net_pnl"] < 0)
-        )
+        gross_profit = sum(t["net_pnl"] for t in trades if t["net_pnl"] > 0)
+        gross_loss = abs(sum(t["net_pnl"] for t in trades if t["net_pnl"] < 0))
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
 
         # Sharpe ratio (simplified)
@@ -809,7 +807,9 @@ class BacktestEngine:
                 avg_return = np.mean(returns)
                 std_return = np.std(returns)
                 sharpe_ratio = (
-                    (avg_return / std_return) * np.sqrt(252 * 24) if std_return > 0 else 0.0 # Assuming hourly bars
+                    (avg_return / std_return) * np.sqrt(252 * 24)
+                    if std_return > 0
+                    else 0.0  # Assuming hourly bars
                 )
             else:
                 sharpe_ratio = 0.0
@@ -848,7 +848,7 @@ async def main():
     try:
         # Load configuration
         config = get_config()
-        
+
         print(f"DynamicStrategyEngine available: {DynamicStrategyEngine is not None}")
         print(f"DB Path: {config.database.path}")
 
@@ -869,6 +869,7 @@ async def main():
                 if active:
                     # Convert DB strategy to StrategyConfig
                     from src.strategy import db_row_to_strategy_config
+
                     strategy_config = db_row_to_strategy_config(active[0])
                     print(f"Loaded active strategy: {strategy_config.name}")
                 await db.close()
@@ -877,6 +878,7 @@ async def main():
         except Exception as e:
             print(f"Failed to load strategy from DB: {e}")
             import traceback
+
             traceback.print_exc()
 
         # Create backtest engine

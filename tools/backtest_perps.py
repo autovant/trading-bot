@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol
 
@@ -26,11 +26,11 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.config import get_config, PerpsConfig
-from src.exchanges.zoomex_v3 import ZoomexV3Client
-from src.strategies.perps_trend_vwap import compute_signals
-from src.strategies.perps_trend_atr_multi_tf import compute_signals_multi_tf
+from src.config import PerpsConfig, get_config
 from src.engine.perps_executor import risk_position_size
+from src.exchanges.zoomex_v3 import ZoomexV3Client
+from src.strategies.perps_trend_atr_multi_tf import compute_signals_multi_tf
+from src.strategies.perps_trend_vwap import compute_signals
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,7 +104,9 @@ class PerpsBacktest:
         if entry_price is None or pd.isna(entry_price):
             return
 
-        stop_price = signals.get("stop_price", entry_price * (1 - self.config.stopLossPct))
+        stop_price = signals.get(
+            "stop_price", entry_price * (1 - self.config.stopLossPct)
+        )
         tp1_price = signals.get(
             "tp1_price", entry_price * (1 + self.config.takeProfitPct)
         )
@@ -200,9 +202,13 @@ class PerpsBacktest:
             )
 
         self.mark_equity(exit_fill)
-        logger.debug("[%s] TP1 partial filled qty=%.4f at %.4f", timestamp, qty, exit_fill)
+        logger.debug(
+            "[%s] TP1 partial filled qty=%.4f at %.4f", timestamp, qty, exit_fill
+        )
 
-    def _finalize_trade(self, price: float, timestamp: pd.Timestamp, reason: str) -> None:
+    def _finalize_trade(
+        self, price: float, timestamp: pd.Timestamp, reason: str
+    ) -> None:
         if not self.active_trade or self.position_qty <= 0:
             return
 
@@ -219,7 +225,9 @@ class PerpsBacktest:
         self.mark_equity(exit_fill)
 
         duration_bars = self.active_trade["bars_in_trade"]
-        risk_dollars = self.active_trade["risk_per_unit"] * self.active_trade["initial_qty"]
+        risk_dollars = (
+            self.active_trade["risk_per_unit"] * self.active_trade["initial_qty"]
+        )
         r_multiple = total_realized / risk_dollars if risk_dollars else 0.0
 
         self.r_multiples.append(r_multiple)
@@ -233,7 +241,9 @@ class PerpsBacktest:
         else:
             self.losing_trades += 1
             self.consecutive_losses += 1
-        self.max_consecutive_losses = max(self.max_consecutive_losses, self.consecutive_losses)
+        self.max_consecutive_losses = max(
+            self.max_consecutive_losses, self.consecutive_losses
+        )
 
         trade_record = {
             "timestamp": timestamp,
@@ -310,8 +320,11 @@ class PerpsBacktest:
             ts = window_ltf.index[-1]
 
             if self.use_multi_tf:
-                htf_window = htf_df[htf_df.index <= ts]
-                signals = compute_signals_multi_tf(window_ltf, htf_window, config=self.config)
+                assert htf_df is not None
+                htf_window = htf_df.loc[htf_df.index <= ts]
+                signals = compute_signals_multi_tf(
+                    window_ltf, htf_window, config=self.config
+                )
             else:
                 signals = compute_signals(window_ltf)
 
@@ -370,8 +383,12 @@ class PerpsBacktest:
 
         avg_r_multiple = np.mean(self.r_multiples) if self.r_multiples else 0.0
         median_r_multiple = np.median(self.r_multiples) if self.r_multiples else 0.0
-        tp1_hit_rate = (self.tp1_hits / self.total_trades) * 100 if self.total_trades else 0
-        tp2_hit_rate = (self.tp2_hits / self.total_trades) * 100 if self.total_trades else 0
+        tp1_hit_rate = (
+            (self.tp1_hits / self.total_trades) * 100 if self.total_trades else 0
+        )
+        tp2_hit_rate = (
+            (self.tp2_hits / self.total_trades) * 100 if self.total_trades else 0
+        )
         avg_duration = np.mean(self.trade_durations) if self.trade_durations else 0
 
         metrics = {
@@ -411,18 +428,26 @@ class PerpsBacktest:
         logger.info("=" * 60)
         logger.info(f"Initial Balance: ${metrics['initial_balance']:.2f}")
         logger.info(f"Final Balance: ${metrics['final_balance']:.2f}")
-        logger.info(f"Total P&L: ${metrics['total_pnl']:.2f} ({metrics['total_pnl_pct']:+.2f}%)")
+        logger.info(
+            f"Total P&L: ${metrics['total_pnl']:.2f} ({metrics['total_pnl_pct']:+.2f}%)"
+        )
         logger.info("-" * 60)
         logger.info(f"Total Trades: {metrics['total_trades']}")
-        logger.info(f"Winning Trades: {metrics['winning_trades']} ({metrics['win_rate']:.2f}%)")
+        logger.info(
+            f"Winning Trades: {metrics['winning_trades']} ({metrics['win_rate']:.2f}%)"
+        )
         logger.info(f"Losing Trades: {metrics['losing_trades']}")
         logger.info(f"Win Rate: {metrics['win_rate']:.2f}%")
         logger.info("-" * 60)
         logger.info(f"Average Win: ${metrics['avg_win']:.2f}")
         logger.info(f"Average Loss: ${metrics['avg_loss']:.2f}")
         logger.info(f"Profit Factor: {metrics['profit_factor']:.2f}")
-        logger.info(f"Avg R Multiple: {metrics['avg_r_multiple']:.2f} (median {metrics['median_r_multiple']:.2f})")
-        logger.info(f"TP1 Hit Rate: {metrics['tp1_hit_rate']:.2f}% | TP2 Hit Rate: {metrics['tp2_hit_rate']:.2f}%")
+        logger.info(
+            f"Avg R Multiple: {metrics['avg_r_multiple']:.2f} (median {metrics['median_r_multiple']:.2f})"
+        )
+        logger.info(
+            f"TP1 Hit Rate: {metrics['tp1_hit_rate']:.2f}% | TP2 Hit Rate: {metrics['tp2_hit_rate']:.2f}%"
+        )
         logger.info(f"Avg Duration: {metrics['avg_duration_bars']:.1f} bars")
         logger.info("-" * 60)
         logger.info(f"Max Drawdown: {metrics['max_drawdown']:.2f}%")
@@ -437,7 +462,8 @@ class PerpsBacktest:
                 {**t, "timestamp": t["timestamp"].isoformat()} for t in self.trades
             ],
             "equity_curve": [
-                {**e, "timestamp": e["timestamp"].isoformat()} for e in self.equity_curve
+                {**e, "timestamp": e["timestamp"].isoformat()}
+                for e in self.equity_curve
             ],
         }
         with open(output_path, "w", encoding="utf-8") as handle:
@@ -448,8 +474,7 @@ class PerpsBacktest:
 class HistoricalDataProvider(Protocol):
     async def fetch(
         self, symbol: str, interval: str, start_date: str, end_date: str
-    ) -> pd.DataFrame:
-        ...
+    ) -> pd.DataFrame: ...
 
 
 class ZoomexDataProvider:
@@ -597,10 +622,19 @@ class CsvDataProvider:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backtest perpetual futures strategy")
-    parser.add_argument("--symbol", type=str, required=True, help="Trading symbol (e.g., BTCUSDT)")
-    parser.add_argument("--start", type=str, required=True, help="Start date (YYYY-MM-DD)")
+    parser.add_argument(
+        "--symbol", type=str, required=True, help="Trading symbol (e.g., BTCUSDT)"
+    )
+    parser.add_argument(
+        "--start", type=str, required=True, help="Start date (YYYY-MM-DD)"
+    )
     parser.add_argument("--end", type=str, required=True, help="End date (YYYY-MM-DD)")
-    parser.add_argument("--interval", type=str, default="5", help="Candle interval in minutes (default: 5)")
+    parser.add_argument(
+        "--interval",
+        type=str,
+        default="5",
+        help="Candle interval in minutes (default: 5)",
+    )
     parser.add_argument(
         "--config",
         type=str,
@@ -613,8 +647,12 @@ def parse_args() -> argparse.Namespace:
         default=1000.0,
         help="Initial balance in USDT (default: 1000)",
     )
-    parser.add_argument("--output", type=str, help="Output file path for results (JSON)")
-    parser.add_argument("--testnet", action="store_true", help="Use testnet for data fetching")
+    parser.add_argument(
+        "--output", type=str, help="Output file path for results (JSON)"
+    )
+    parser.add_argument(
+        "--testnet", action="store_true", help="Use testnet for data fetching"
+    )
     parser.add_argument(
         "--data-source",
         type=str,

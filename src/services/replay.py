@@ -79,13 +79,17 @@ class ReplayService(BaseService):
         self._dataset = []
 
     async def _run_loop(self) -> None:
-        assert self.config and self.messaging
-        subject = self.config.messaging.subjects["market_data"]
+        config = self.config
+        messaging = self.messaging
+        if config is None or messaging is None:
+            raise RuntimeError("ReplayService started before initialisation")
+
+        subject = config.messaging.subjects["market_data"]
 
         while True:
             for snapshot in self._dataset:
                 await self._running.wait()
-                await self.messaging.publish(subject, snapshot)
+                await messaging.publish(subject, snapshot)
                 await asyncio.sleep(self._interval)
 
     async def _handle_control(self, msg: Msg) -> None:
@@ -98,8 +102,11 @@ class ReplayService(BaseService):
             await self.set_state(payload)
 
     def _derive_interval(self) -> float:
-        assert self.config is not None
-        speed = self.config.replay.speed.lower()
+        config = self.config
+        if config is None:
+            raise RuntimeError("ReplayService started before initialisation")
+
+        speed = config.replay.speed.lower()
         multiplier = 1
         if speed.endswith("x") and speed[:-1].isdigit():
             multiplier = max(int(speed[:-1]), 1)
@@ -107,8 +114,11 @@ class ReplayService(BaseService):
         return max(base_interval / multiplier, 0.05)
 
     def _load_dataset(self) -> List[Dict[str, float | str]]:
-        assert self.config is not None
-        source = self.config.replay.source
+        config = self.config
+        if config is None:
+            raise RuntimeError("ReplayService started before initialisation")
+
+        source = config.replay.source
         scheme, path = self._parse_source(source)
         dataset: List[Dict[str, float | str]] = []
 
@@ -130,7 +140,7 @@ class ReplayService(BaseService):
 
         for _, row in df.iterrows():
             ts = self._coerce_timestamp(row["timestamp"])
-            symbol = row.get("symbol", self.config.trading.symbols[0])
+            symbol = row.get("symbol", config.trading.symbols[0])
             open_price = float(row.get("open", row.get("close", 0)))
             high = float(row.get("high", open_price))
             low = float(row.get("low", open_price))
@@ -153,7 +163,7 @@ class ReplayService(BaseService):
         try:
             return datetime.fromisoformat(str(value))
         except ValueError:
-            return datetime.utcnow()
+            return datetime.now(timezone.utc)
 
     @staticmethod
     def _parse_source(source: str) -> Tuple[str, Path]:

@@ -1,11 +1,9 @@
-import asyncio
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from tools import fetch_history
-from tools import fetch_history_all
+from tools import fetch_history, fetch_history_all
 
 
 def _dummy_df(start_ms: int) -> pd.DataFrame:
@@ -29,17 +27,25 @@ def _dummy_df(start_ms: int) -> pd.DataFrame:
 
 
 @pytest.mark.asyncio
-async def test_fetch_history_writes_and_merges(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_fetch_history_writes_and_merges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     calls = {"count": 0}
 
-    async def fake_get_klines(self, symbol, interval="5", limit=300, start=None, end=None):
+    async def fake_get_klines(
+        self, symbol, interval="5", limit=300, start=None, end=None
+    ):
         # Stop once cursor advances beyond the end of the requested window.
         if start and start > fetch_history._to_ms("2023-01-01T00:20:00Z"):
-            return pd.DataFrame(columns=["start", "open", "high", "low", "close", "volume"])
+            return pd.DataFrame(
+                columns=["start", "open", "high", "low", "close", "volume"]
+            )
         calls["count"] += 1
         return _dummy_df(int(start))
 
-    monkeypatch.setattr(fetch_history.ZoomexV3Client, "get_klines", fake_get_klines, raising=False)
+    monkeypatch.setattr(
+        fetch_history.ZoomexV3Client, "get_klines", fake_get_klines, raising=False
+    )
 
     output = tmp_path / "SOLUSDT_5m.csv"
     cfg = fetch_history.FetchConfig(
@@ -52,7 +58,14 @@ async def test_fetch_history_writes_and_merges(tmp_path: Path, monkeypatch: pyte
 
     await fetch_history.run_fetch(cfg)
     first = pd.read_csv(output)
-    assert list(first.columns) == ["timestamp", "open", "high", "low", "close", "volume"]
+    assert list(first.columns) == [
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    ]
     assert len(first) > 0
     assert calls["count"] > 0
 
@@ -62,7 +75,9 @@ async def test_fetch_history_writes_and_merges(tmp_path: Path, monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_fetch_history_all_invokes_fetcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_fetch_history_all_invokes_fetcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     called = []
 
     async def fake_run_fetch(cfg):

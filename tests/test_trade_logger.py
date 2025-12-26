@@ -1,7 +1,7 @@
 import csv
 from datetime import datetime, timezone
 
-from src.logging.trade_logger import TradeLogger
+from src.app_logging.trade_logger import TradeLogger
 
 
 def _sample_trade(symbol: str = "BTCUSDT") -> dict:

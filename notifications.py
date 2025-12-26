@@ -1,13 +1,14 @@
 import asyncio
 import logging
-from typing import Optional
 
 import requests
 
 logger = logging.getLogger(__name__)
 
 
-def send_telegram_message(bot_token: str, chat_id: str, text: str, parse_mode: str = "Markdown") -> bool:
+def send_telegram_message(
+    bot_token: str, chat_id: str, text: str, parse_mode: str = "Markdown"
+) -> bool:
     """
     Fire-and-forget Telegram notification.
     Returns True on 200 OK, False otherwise.
@@ -36,4 +37,6 @@ async def send_telegram_message_async(
     bot_token: str, chat_id: str, text: str, parse_mode: str = "Markdown"
 ) -> bool:
     """Async wrapper to avoid blocking the event loop."""
-    return await asyncio.to_thread(send_telegram_message, bot_token, chat_id, text, parse_mode)
+    return await asyncio.to_thread(
+        send_telegram_message, bot_token, chat_id, text, parse_mode
+    )

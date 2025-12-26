@@ -26,7 +26,6 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.config import get_config
 from src.exchanges.zoomex_v3 import ZoomexV3Client
 
 logging.basicConfig(
@@ -114,7 +113,14 @@ async def validate_config_file(config_path: str, result: ValidationResult):
 
     perps_config = config_data["perps"]
 
-    required_fields = ["symbol", "interval", "leverage", "riskPct", "stopLossPct", "takeProfitPct"]
+    required_fields = [
+        "symbol",
+        "interval",
+        "leverage",
+        "riskPct",
+        "stopLossPct",
+        "takeProfitPct",
+    ]
     for field in required_fields:
         if field not in perps_config:
             result.add_fail(f"Missing required field in perps config: {field}")
@@ -185,7 +191,9 @@ async def validate_symbol(symbol: str, mode: str, result: ValidationResult):
             result.add_fail(f"Symbol validation failed: {e}")
 
 
-async def validate_historical_data(symbol: str, interval: str, mode: str, result: ValidationResult):
+async def validate_historical_data(
+    symbol: str, interval: str, mode: str, result: ValidationResult
+):
     logger.info(f"Validating historical data: {symbol} {interval}m")
 
     base_url = (
@@ -202,7 +210,9 @@ async def validate_historical_data(symbol: str, interval: str, mode: str, result
             if df.empty:
                 result.add_fail(f"No historical data available for {symbol}")
             elif len(df) < 35:
-                result.add_warning(f"Limited historical data: {len(df)} candles (need 35+ for indicators)")
+                result.add_warning(
+                    f"Limited historical data: {len(df)} candles (need 35+ for indicators)"
+                )
             else:
                 result.add_pass(f"Historical data available: {len(df)} candles")
                 result.add_pass(f"  Latest candle: {df.index[-1]}")

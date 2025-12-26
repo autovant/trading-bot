@@ -1,5 +1,6 @@
+from typing import Any, cast
+
 import pandas as pd
-import numpy as np
 
 
 def sma(series: pd.Series, n: int) -> pd.Series:
@@ -13,8 +14,9 @@ def ema(series: pd.Series, n: int) -> pd.Series:
 
 def rsi_ema(series: pd.Series, n: int = 14) -> pd.Series:
     delta = series.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
+    delta_any = cast(Any, delta)
+    gain = delta_any.where(delta_any > 0, 0.0)
+    loss = -delta_any.where(delta_any < 0, 0.0)
     avg_gain = gain.ewm(alpha=1 / n, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / n, adjust=False).mean()
     rs = avg_gain / avg_loss

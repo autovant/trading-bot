@@ -1,13 +1,13 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import BacktestResults from "./BacktestResults";
 
 // --- Types matching Backend Schema ---
 
 type IndicatorConfig = {
   name: string;
-  params: Record<string, any>;
+  params: Record<string, string | number>;
 };
 
 type ConditionConfig = {
@@ -123,6 +123,35 @@ const defaultConfig: StrategyConfig = {
   confidence_threshold: 70.0,
 };
 
+// Backtest results type matching BacktestResults component
+type BacktestResultsData = {
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  win_rate: number;
+  total_pnl: number;
+  profit_factor: number;
+  max_drawdown: number;
+  sharpe_ratio: number;
+  trades: Array<{
+    symbol: string;
+    direction: string;
+    size: number;
+    entry_price: number;
+    exit_price: number;
+    entry_time: string;
+    exit_time: string;
+    pnl: number;
+    net_pnl: number;
+    reason: string;
+  }>;
+  equity_curve: Array<{
+    timestamp: string;
+    equity: number;
+    drawdown: number;
+  }>;
+};
+
 const StrategyBuilder: React.FC = () => {
   const [config, setConfig] = useState<StrategyConfig>(defaultConfig);
   const [activeTab, setActiveTab] = useState("regime");
@@ -131,7 +160,7 @@ const StrategyBuilder: React.FC = () => {
     start_date: "2023-01-01",
     end_date: "2024-01-01",
   });
-  const [results, setResults] = useState<any>(null);
+  const [results, setResults] = useState<BacktestResultsData | null>(null);
   const [loading, setLoading] = useState(false);
   const [savedStrategies, setSavedStrategies] = useState<StrategyConfig[]>([]);
 
@@ -217,17 +246,10 @@ const StrategyBuilder: React.FC = () => {
     }
   };
 
-  const runBacktest = async () => {
-    setLoading(true);
-    setResults(null);
-    try {
-      const payload = {
-        symbol: backtestParams.symbol,
-        start_date: backtestParams.start_date,
-        end_date: backtestParams.end_date,
-        strategy: config,
-      };
-
+    const runBacktest = async () => {
+      setLoading(true);
+      setResults(null);
+      try {
       // 1. Submit Backtest Job
       const submitRes = await fetch(`${apiBase}/backtests`, {
         method: "POST",
@@ -299,7 +321,7 @@ const StrategyBuilder: React.FC = () => {
       onChange([...conditions, { indicator_a: "close", operator: ">", indicator_b: 0 }]);
     };
 
-    const updateCondition = (index: number, field: keyof ConditionConfig, value: any) => {
+    const updateCondition = (index: number, field: keyof ConditionConfig, value: string | number) => {
       const next = [...conditions];
       next[index] = { ...next[index], [field]: value };
       onChange(next);
@@ -359,19 +381,19 @@ const StrategyBuilder: React.FC = () => {
       onChange([...indicators, { name: "ema", params: { period: 14 } }]);
     };
 
-    const updateIndicator = (index: number, field: keyof IndicatorConfig, value: any) => {
+    const updateIndicator = (index: number, field: keyof IndicatorConfig, value: string | Record<string, string | number>) => {
       const next = [...indicators];
       // If name changes, reset params to default for that indicator
-      if (field === "name") {
+      if (field === "name" && typeof value === "string") {
         const defaultParams = indicatorOptions.find((opt) => opt.value === value)?.params || {};
         next[index] = { ...next[index], name: value, params: defaultParams };
-      } else {
-        next[index] = { ...next[index], [field]: value };
+      } else if (field === "params" && typeof value === "object") {
+        next[index] = { ...next[index], params: value };
       }
       onChange(next);
     };
 
-    const updateParam = (index: number, key: string, value: any) => {
+    const updateParam = (index: number, key: string, value: string | number) => {
       const next = [...indicators];
       next[index].params = { ...next[index].params, [key]: value };
       onChange(next);

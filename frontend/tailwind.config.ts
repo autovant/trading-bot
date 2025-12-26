@@ -9,39 +9,56 @@ export default {
     theme: {
         extend: {
             colors: {
-                background: "#050505",
-                foreground: "#e0e0e0",
+                background: "#020408", // Void Black
+                foreground: "#E7ECF5",
                 card: {
-                    DEFAULT: "#0a0a0a",
-                    border: "#1f1f1f",
-                    hover: "#141414",
+                    DEFAULT: "rgba(11, 16, 32, 0.7)",
+                    border: "rgba(255, 255, 255, 0.08)",
+                    hover: "rgba(255, 255, 255, 0.05)",
                 },
                 brand: {
-                    DEFAULT: "#0066FF", // Blue from the image
-                    hover: "#0052cc",
-                    glow: "rgba(0, 102, 255, 0.5)",
+                    DEFAULT: "#00FF9D", // Neon Mint
+                    hover: "#00CC7D",
+                    glow: "rgba(0, 255, 157, 0.4)",
+                    secondary: "#00E0FF", // Neon Cyan
                 },
                 accent: {
-                    cyan: "#00ff9d",
-                    purple: "#9d00ff",
+                    cyan: "#00E0FF",
+                    amber: "#FFB02E",
+                    purple: "#9D00FF",
+                    pink: "#FF007A"
                 },
                 trade: {
-                    long: "#00C853", // Green
-                    short: "#FF3D00", // Red
-                    neutral: "#B0BEC5",
+                    long: "#00FF9D",
+                    short: "#FF3B30",
+                    neutral: "#64748B",
                 },
                 gray: {
-                    850: "#1a1a1a",
-                    900: "#121212",
-                    950: "#080808",
+                    750: "#2D3748",
+                    800: "#1A202C",
+                    850: "#141927",
+                    900: "#0E1320",
+                    950: "#05070A",
                 }
             },
             fontFamily: {
-                sans: ['Inter', 'sans-serif'],
-                mono: ['JetBrains Mono', 'monospace'],
+                sans: ['var(--font-sans)', 'Space Grotesk', 'Inter', 'system-ui', 'sans-serif'],
+                mono: ['var(--font-mono)', 'JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'monospace'],
             },
             animation: {
-                'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                'pulse-slow': 'pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                'glow': 'glow 3s ease-in-out infinite alternate',
+                'slide-in': 'slide-in 0.3s ease-out',
+            },
+            keyframes: {
+                glow: {
+                    '0%': { boxShadow: '0 0 5px rgba(0, 255, 157, 0.1)' },
+                    '100%': { boxShadow: '0 0 20px rgba(0, 255, 157, 0.4)' },
+                },
+                'slide-in': {
+                    '0%': { transform: 'translateY(10px)', opacity: '0' },
+                    '100%': { transform: 'translateY(0)', opacity: '1' },
+                }
             }
         },
     },

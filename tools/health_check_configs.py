@@ -18,7 +18,6 @@ from pathlib import Path
 from statistics import mean, median
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-
 logger = logging.getLogger(__name__)
 
 # Thresholds can be tuned as needed
@@ -151,7 +150,9 @@ def load_trades(csv_path: Path) -> List[Dict[str, Any]]:
         }
         missing = expected_columns - set(reader.fieldnames)
         if missing:
-            raise ValueError(f"Trade CSV missing required columns: {', '.join(sorted(missing))}")
+            raise ValueError(
+                f"Trade CSV missing required columns: {', '.join(sorted(missing))}"
+            )
 
         trades: List[Dict[str, Any]] = []
         for row in reader:
@@ -245,7 +246,9 @@ def extract_sweep_metrics(
 
     if metric_key == "realized_pnl":
         # Prefer pnl-based metrics when the caller asks for pnl
-        avg_value = first_number(["pnl", "avg_pnl", "metric_mean", "pnl_pct", "avg_pnl_pct"])
+        avg_value = first_number(
+            ["pnl", "avg_pnl", "metric_mean", "pnl_pct", "avg_pnl_pct"]
+        )
 
     return {
         "avg_value": avg_value,
@@ -314,9 +317,15 @@ def format_human_readable(
     min_trades: int,
 ) -> str:
     lines = [f"Symbol: {symbol}", f"  Config: {config_id or 'N/A'}"]
-    lines.append(f"  Trades (window): {live_metrics.get('num_trades', 0)} (min required: {min_trades})")
+    lines.append(
+        f"  Trades (window): {live_metrics.get('num_trades', 0)} (min required: {min_trades})"
+    )
     lines.append("  Sweep metrics:")
-    lines.append(f"    win_rate: {sweep_metrics.get('win_rate', 0.0):.2f}" if sweep_metrics.get("win_rate") is not None else "    win_rate: n/a")
+    lines.append(
+        f"    win_rate: {sweep_metrics.get('win_rate', 0.0):.2f}"
+        if sweep_metrics.get("win_rate") is not None
+        else "    win_rate: n/a"
+    )
     lines.append(
         f"    avg_pnl_pct: {sweep_metrics.get('avg_value', 0.0):.2f}"
         if sweep_metrics.get("avg_value") is not None
@@ -490,8 +499,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Health check comparing live performance vs sweep best-config baselines."
     )
-    parser.add_argument("--best-configs-json", required=True, help="Path to best_configs.json")
-    parser.add_argument("--trades-csv", required=True, help="Path to live trade log CSV")
+    parser.add_argument(
+        "--best-configs-json", required=True, help="Path to best_configs.json"
+    )
+    parser.add_argument(
+        "--trades-csv", required=True, help="Path to live trade log CSV"
+    )
     parser.add_argument("--symbol", help="Optional symbol filter (e.g., BTCUSDT)")
     parser.add_argument(
         "--window-trades",
@@ -563,7 +576,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.json_out:
         payload = {
             "schema_version": "1.0",
-            "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "generated_at": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
             "metric": args.metric,
             "window_trades": args.window_trades,
             "min_trades": args.min_trades,

@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from ..config import load_config
+from ..config import TradingBotConfig, load_config
 from .base import BaseService
 
 logger = logging.getLogger(__name__)
@@ -13,20 +13,21 @@ logger = logging.getLogger(__name__)
 class MonitorService(BaseService):
     """
     Runtime health monitoring service.
-    
+
     Monitors system vitals (e.g., memory, disk) and aggregates
     application-level health status from other services.
     """
 
     def __init__(self) -> None:
         super().__init__("monitor")
-        self.config = None
+        self.config: Optional[TradingBotConfig] = None
         self._monitoring_task: Optional[asyncio.Task] = None
 
     async def on_startup(self) -> None:
-        self.config = load_config()
-        self.set_mode(self.config.app_mode)
-        
+        config = load_config()
+        self.config = config
+        self.set_mode(config.app_mode)
+
         logger.info("Monitor service starting checks...")
         self._monitoring_task = asyncio.create_task(self._monitor_loop())
 
@@ -47,7 +48,7 @@ class MonitorService(BaseService):
                 raise
             except Exception:
                 logger.exception("Error in health monitor loop")
-            
+
             # Check every 60 seconds
             await asyncio.sleep(60)
 

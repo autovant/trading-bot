@@ -11,6 +11,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest

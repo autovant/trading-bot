@@ -2,8 +2,7 @@ import asyncio
 import logging
 import math
 import uuid
-from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -37,9 +36,9 @@ class BacktestConfig(BaseModel):
     timeframe: str = "1m"
     start: Optional[datetime] = None
     end: Optional[datetime] = None
-    initial_capital: float = Field(100_000.0, gt=0)
-    slippage: float = Field(0.0003, ge=0.0)
-    fee: float = Field(0.0004, ge=0.0)
+    initial_capital: float = Field(default=100_000.0, gt=0)
+    slippage: float = Field(default=0.0003, ge=0.0)
+    fee: float = Field(default=0.0004, ge=0.0)
     risk_free_rate: float = 0.02  # annual
     mode: str = "event"  # "event" | "vectorized"
 
@@ -74,7 +73,7 @@ class BacktestExecutionEngine(IExecutionEngine):
         self.orders: Dict[str, Order] = {}
         self.equity_curve: List[Tuple[datetime, float]] = []
         self.trade_pnls: List[float] = []
-        self.current_time: datetime = datetime.utcnow()
+        self.current_time: datetime = datetime.now(timezone.utc)
 
     async def submit_order(self, order: Order) -> Order:
         price = order.price or order.metadata.get("tick_price")
@@ -116,7 +115,8 @@ class BacktestExecutionEngine(IExecutionEngine):
             if existing.side == order.side:
                 new_qty = existing.quantity + order.quantity
                 weighted_entry = (
-                    existing.entry_price * existing.quantity + fill_price * order.quantity
+                    existing.entry_price * existing.quantity
+                    + fill_price * order.quantity
                 ) / new_qty
                 existing.entry_price = weighted_entry
                 existing.quantity = new_qty
@@ -170,7 +170,9 @@ class BacktestExecutionEngine(IExecutionEngine):
     def _apply_slippage(self, price: float, side: Side) -> float:
         return price * (1 + self.slippage if side == Side.BUY else 1 - self.slippage)
 
-    def _realized_pnl(self, side: Side, entry: float, exit_price: float, qty: float) -> float:
+    def _realized_pnl(
+        self, side: Side, entry: float, exit_price: float, qty: float
+    ) -> float:
         if side == Side.BUY:
             return (exit_price - entry) * qty
         return (entry - exit_price) * qty
@@ -179,7 +181,12 @@ class BacktestExecutionEngine(IExecutionEngine):
 class BacktestEngine:
     """Event-driven + vectorized backtester built on Polars."""
 
-    def __init__(self, strategy: IStrategy, data: pl.DataFrame, config: Optional[BacktestConfig] = None):
+    def __init__(
+        self,
+        strategy: IStrategy,
+        data: pl.DataFrame,
+        config: Optional[BacktestConfig] = None,
+    ):
         if data.is_empty():
             raise ValueError("Backtest data is empty")
         self.strategy = strategy
@@ -224,10 +231,14 @@ class BacktestEngine:
         signals_df = self.strategy.vectorized_signals(df)
 
         if signals_df is None or "signal" not in signals_df.columns:
-            logger.info("Strategy does not implement vectorized_signals; falling back to event-driven run.")
+            logger.info(
+                "Strategy does not implement vectorized_signals; falling back to event-driven run."
+            )
             return asyncio.get_event_loop().run_until_complete(self.run_event_driven())
 
-        merged = df.join(signals_df.select(["timestamp", "signal"]), on="timestamp", how="left")
+        merged = df.join(
+            signals_df.select(["timestamp", "signal"]), on="timestamp", how="left"
+        )
         merged = merged.with_columns(
             pl.col("signal").fill_null(strategy="backward").fill_null(0).alias("signal")
         )
@@ -235,14 +246,21 @@ class BacktestEngine:
             pl.col("close").pct_change().fill_null(0.0).alias("returns")
         )
         merged = merged.with_columns(
-            (pl.col("returns") * pl.col("signal").shift(1).fill_null(0.0)).alias("strategy_returns")
+            (pl.col("returns") * pl.col("signal").shift(1).fill_null(0.0)).alias(
+                "strategy_returns"
+            )
         )
         merged = merged.with_columns(
-            ((1 + pl.col("strategy_returns")).cumprod() * self.config.initial_capital).alias("equity")
+            (
+                (1 + pl.col("strategy_returns")).cum_prod()
+                * self.config.initial_capital
+            ).alias("equity")
         )
 
-        equity_curve = list(zip(merged["timestamp"], merged["equity"]))
-        trade_returns = self._extract_trade_returns(merged["signal"].to_list(), merged["returns"].to_list())
+        equity_curve = list(zip(merged["timestamp"], merged["equity"], strict=False))
+        trade_returns = self._extract_trade_returns(
+            merged["signal"].to_list(), merged["returns"].to_list()
+        )
 
         self.execution_engine.equity_curve = equity_curve
         metrics = self._calculate_metrics(
@@ -295,19 +313,25 @@ class BacktestEngine:
         equity = np.array([eq for _, eq in equity_curve], dtype=float)
         total_return = (equity[-1] / equity[0]) - 1.0
 
-        periods_per_year = max(1, math.floor(31536000 / TIMEFRAME_PERIODS.get(timeframe, 3600)))
+        periods_per_year = max(
+            1, math.floor(31536000 / TIMEFRAME_PERIODS.get(timeframe, 3600))
+        )
         rf_per_period = self.config.risk_free_rate / periods_per_year
 
         returns_arr = np.array(returns, dtype=float)
         excess_returns = returns_arr - rf_per_period
         sharpe = 0.0
         if excess_returns.std(ddof=1) > 0:
-            sharpe = (excess_returns.mean() / excess_returns.std(ddof=1)) * math.sqrt(periods_per_year)
+            sharpe = (excess_returns.mean() / excess_returns.std(ddof=1)) * math.sqrt(
+                periods_per_year
+            )
 
         downside = excess_returns[excess_returns < 0]
         sortino = 0.0
         if downside.std(ddof=1) > 0:
-            sortino = (excess_returns.mean() / downside.std(ddof=1)) * math.sqrt(periods_per_year)
+            sortino = (excess_returns.mean() / downside.std(ddof=1)) * math.sqrt(
+                periods_per_year
+            )
 
         max_dd = self._max_drawdown(equity)
 
@@ -321,7 +345,9 @@ class BacktestEngine:
         losses = len(negative)
         win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0.0
 
-        calmar = (total_return * periods_per_year) / max_dd if max_dd != 0 else float("inf")
+        calmar = (
+            (total_return * periods_per_year) / max_dd if max_dd != 0 else float("inf")
+        )
 
         return BacktestMetrics(
             total_return=total_return,
@@ -339,7 +365,9 @@ class BacktestEngine:
         drawdowns = (equity - running_max) / running_max
         return float(abs(drawdowns.min()))
 
-    def _equity_returns_from_curve(self, equity_curve: List[Tuple[datetime, float]]) -> List[float]:
+    def _equity_returns_from_curve(
+        self, equity_curve: List[Tuple[datetime, float]]
+    ) -> List[float]:
         returns = []
         for i in range(1, len(equity_curve)):
             prev = equity_curve[i - 1][1]
@@ -347,16 +375,23 @@ class BacktestEngine:
             returns.append((curr - prev) / prev if prev != 0 else 0.0)
         return returns
 
-    def _equity_curve_to_dict(self, equity_curve: List[Tuple[datetime, float]]) -> List[Dict[str, float]]:
-        return [{"timestamp": ts.timestamp(), "equity": float(eq)} for ts, eq in equity_curve]
+    def _equity_curve_to_dict(
+        self, equity_curve: List[Tuple[datetime, float]]
+    ) -> List[Dict[str, float]]:
+        return [
+            {"timestamp": ts.timestamp(), "equity": float(eq)}
+            for ts, eq in equity_curve
+        ]
 
-    def _extract_trade_returns(self, signals: List[float], returns: List[float]) -> List[float]:
+    def _extract_trade_returns(
+        self, signals: List[float], returns: List[float]
+    ) -> List[float]:
         if not signals or not returns:
             return []
         trade_returns: List[float] = []
         prev_signal = 0.0
         acc = 0.0
-        for sig, ret in zip(signals, returns):
+        for sig, ret in zip(signals, returns, strict=False):
             acc += ret * prev_signal
             if sig != prev_signal:
                 if acc != 0:

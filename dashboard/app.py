@@ -8,13 +8,12 @@ so it works identically for Docker and local-hosted deployments.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import requests
 import streamlit as st
-
 
 OPS_API_URL = os.getenv("OPS_API_URL", "http://127.0.0.1:8080").rstrip("/")
 REPLAY_URL = os.getenv("REPLAY_URL", "http://127.0.0.1:8085").rstrip("/")
@@ -315,7 +314,6 @@ def control_replay(action: str) -> bool:
         return False
 
 
-
 def _style_app() -> None:
     st.set_page_config(
         page_title="Perps Command Center",
@@ -585,6 +583,8 @@ def _style_app() -> None:
     """
 
     st.markdown(style_block, unsafe_allow_html=True)
+
+
 def _render_sidebar(
     mode_data: Dict[str, Any], replay_state: Optional[Dict[str, Any]] = None
 ) -> None:
@@ -644,7 +644,6 @@ def _render_sidebar(
     if st.sidebar.button("Refresh Data", use_container_width=True):
         _clear_caches()
         st.experimental_rerun()
-
 
 
 def _render_overview_tab(mode_data: Dict[str, Any]) -> None:
@@ -731,7 +730,7 @@ def _render_overview_tab(mode_data: Dict[str, Any]) -> None:
         ]
     )
     st.markdown(
-        f'''<div class="alpha-grid">{top_cards_html}</div>''',
+        f"""<div class="alpha-grid">{top_cards_html}</div>""",
         unsafe_allow_html=True,
     )
 
@@ -743,9 +742,7 @@ def _render_overview_tab(mode_data: Dict[str, Any]) -> None:
     )
     gross_display = _format_usd(position_summary["gross_exposure"])
     net_display = _format_usd(position_summary["net_exposure"])
-    exposure_annotation = (
-        f"{position_summary['long_count']} long / {position_summary['short_count']} short"
-    )
+    exposure_annotation = f"{position_summary['long_count']} long / {position_summary['short_count']} short"
     secondary_cards_html = "".join(
         [
             _alpha_card("Gross Exposure", gross_display, exposure_annotation),
@@ -755,7 +752,7 @@ def _render_overview_tab(mode_data: Dict[str, Any]) -> None:
         ]
     )
     st.markdown(
-        f'''<div class="alpha-grid">{secondary_cards_html}</div>''',
+        f"""<div class="alpha-grid">{secondary_cards_html}</div>""",
         unsafe_allow_html=True,
     )
 
@@ -806,7 +803,15 @@ def _render_overview_tab(mode_data: Dict[str, Any]) -> None:
         exposure_col.error(f"Unable to load positions: {positions_error}")
     elif position_summary["dataframe"] is not None:
         display_df = position_summary["dataframe"].copy()
-        numeric_cols = ["Size", "Entry", "Mark", "Notional", "Unrealised", "Book %", "Delta %"]
+        numeric_cols = [
+            "Size",
+            "Entry",
+            "Mark",
+            "Notional",
+            "Unrealised",
+            "Book %",
+            "Delta %",
+        ]
         display_df[numeric_cols] = display_df[numeric_cols].apply(
             pd.to_numeric, errors="coerce"
         )
@@ -875,9 +880,7 @@ def _render_overview_tab(mode_data: Dict[str, Any]) -> None:
         risk_col.error(f"Unable to fetch risk snapshots: {risk_error}")
     elif risk_snapshots:
         risk_df = pd.DataFrame(risk_snapshots)
-        risk_df["created_at"] = pd.to_datetime(
-            risk_df["created_at"], errors="coerce"
-        )
+        risk_df["created_at"] = pd.to_datetime(risk_df["created_at"], errors="coerce")
         risk_df.sort_values("created_at", inplace=True)
         plot_df = risk_df.dropna(subset=["created_at"]).set_index("created_at")
         if not plot_df.empty:
@@ -892,13 +895,13 @@ def _render_overview_tab(mode_data: Dict[str, Any]) -> None:
             streak = int(snapshot.get("consecutive_losses", 0) or 0)
             status = "Alert" if snapshot.get("crisis_mode") else "Stable"
             risk_col.markdown(
-                f'''
+                f"""
                 <div class="guardrail-card" style="margin-bottom:0.5rem;">
                     <div class="alpha-card__label">{label}</div>
                     <div class="alpha-card__value">{drawdown:.2f}%</div>
                     <div class="alpha-card__meta">Drawdown | Vol {vol:.2f} | Loss streak {streak} | {status}</div>
                 </div>
-                ''',
+                """,
                 unsafe_allow_html=True,
             )
     else:
@@ -913,19 +916,23 @@ def _render_overview_tab(mode_data: Dict[str, Any]) -> None:
         trades_df = pd.DataFrame(trades)
         trades_df["timestamp"] = pd.to_datetime(trades_df["timestamp"])
         trades_df.sort_values("timestamp", ascending=False, inplace=True)
-        trades_view = trades_df[
-            [
-                "timestamp",
-                "symbol",
-                "side",
-                "quantity",
-                "price",
-                "realized_pnl",
-                "slippage_bps",
-                "latency_ms",
-                "maker",
+        trades_view = (
+            trades_df[
+                [
+                    "timestamp",
+                    "symbol",
+                    "side",
+                    "quantity",
+                    "price",
+                    "realized_pnl",
+                    "slippage_bps",
+                    "latency_ms",
+                    "maker",
+                ]
             ]
-        ].head(60).copy()
+            .head(60)
+            .copy()
+        )
         trades_view.rename(
             columns={
                 "timestamp": "Timestamp",
@@ -948,7 +955,6 @@ def _render_overview_tab(mode_data: Dict[str, Any]) -> None:
         trades_col.caption(
             f"{trade_stats['total']} trades | Fill quality {slippage_display}"
         )
-
 
 
 def _render_config_tab(mode_data: Dict[str, Any]) -> None:
@@ -1035,14 +1041,21 @@ def _render_config_tab(mode_data: Dict[str, Any]) -> None:
 
                 if submitted:
                     payload: Dict[str, Any] = {}
-                    if abs(
-                        risk_per_trade - trading.get("risk_per_trade", risk_per_trade)
-                    ) > 1e-6:
+                    if (
+                        abs(
+                            risk_per_trade
+                            - trading.get("risk_per_trade", risk_per_trade)
+                        )
+                        > 1e-6
+                    ):
                         payload["risk_per_trade"] = float(risk_per_trade)
-                    if abs(
-                        soft_atr_multiplier
-                        - stops.get("soft_atr_multiplier", soft_atr_multiplier)
-                    ) > 1e-6:
+                    if (
+                        abs(
+                            soft_atr_multiplier
+                            - stops.get("soft_atr_multiplier", soft_atr_multiplier)
+                        )
+                        > 1e-6
+                    ):
                         payload["soft_atr_multiplier"] = float(soft_atr_multiplier)
                     if int(spread_budget_bps) != int(
                         paper_defaults.get("max_slippage_bps", spread_budget_bps)
@@ -1057,9 +1070,7 @@ def _render_config_tab(mode_data: Dict[str, Any]) -> None:
                                 "POST", "/api/config/stage", json=payload
                             )
                             stage_version = response.get("version")
-                            st.success(
-                                f"Staged configuration version {stage_version}."
-                            )
+                            st.success(f"Staged configuration version {stage_version}.")
                             st.session_state["last_staged_version"] = stage_version
                             get_config_snapshot.clear()
                             list_config_versions.clear()
@@ -1068,12 +1079,12 @@ def _render_config_tab(mode_data: Dict[str, Any]) -> None:
 
         if stage_version:
             st.markdown(
-                f'''
+                f"""
                 <div class="guardrail-card" style="margin-top: 0.8rem;">
                     <strong>Ready to apply staged config?</strong><br/>
                     Version: <code>{stage_version}</code>
                 </div>
-                ''',
+                """,
                 unsafe_allow_html=True,
             )
             apply_col_a, apply_col_b = st.columns([1, 3])
@@ -1097,12 +1108,12 @@ def _render_config_tab(mode_data: Dict[str, Any]) -> None:
             if versions:
                 for version in versions:
                     st.markdown(
-                        f'''
+                        f"""
                         <div class="guardrail-card" style="margin-bottom: 0.5rem;">
                             <div class="alpha-card__label">v{version.get('version', '-')}</div>
                             <div class="alpha-card__meta">{version.get('created_at', '-')} | {version.get('author', 'ops')} | {version.get('summary') or 'No summary'}</div>
                         </div>
-                        ''',
+                        """,
                         unsafe_allow_html=True,
                     )
             else:
@@ -1119,7 +1130,8 @@ def _render_config_tab(mode_data: Dict[str, Any]) -> None:
         if paper_config:
             latency_cfg = paper_config.get("latency_ms", {"mean": 120, "p95": 300})
             partial_cfg = paper_config.get(
-                "partial_fill", {"enabled": True, "min_slice_pct": 0.15, "max_slices": 4}
+                "partial_fill",
+                {"enabled": True, "min_slice_pct": 0.15, "max_slices": 4},
             )
 
             with st.form("paper_config_form"):
@@ -1205,7 +1217,10 @@ def _render_config_tab(mode_data: Dict[str, Any]) -> None:
                         "max_slippage_bps": float(max_slippage_bps),
                         "spread_slippage_coeff": float(spread_coeff),
                         "ofi_slippage_coeff": float(ofi_coeff),
-                        "latency_ms": {"mean": float(latency_mean), "p95": float(latency_p95)},
+                        "latency_ms": {
+                            "mean": float(latency_mean),
+                            "p95": float(latency_p95),
+                        },
                         "partial_fill": {
                             "enabled": bool(partial_enabled),
                             "min_slice_pct": float(min_slice_pct),
@@ -1329,10 +1344,11 @@ def _render_config_tab(mode_data: Dict[str, Any]) -> None:
                 st.experimental_rerun()
 
 
-
 def _render_backtest_tab() -> None:
     st.subheader("Research Lab: Backtesting")
-    st.caption("Replay and stress-test the perps playbook before committing real margin.")
+    st.caption(
+        "Replay and stress-test the perps playbook before committing real margin."
+    )
 
     today = date.today()
     default_start = today - timedelta(days=30)
@@ -1392,9 +1408,9 @@ def _render_backtest_tab() -> None:
             completed,
             key=lambda job: job.get("result", {}).get("max_drawdown", float("inf")),
         )
-        avg_win = sum(j.get("result", {}).get("win_rate", 0.0) for j in completed) / max(
-            len(completed), 1
-        )
+        avg_win = sum(
+            j.get("result", {}).get("win_rate", 0.0) for j in completed
+        ) / max(len(completed), 1)
         summary_cards = "".join(
             [
                 _alpha_card(
@@ -1420,14 +1436,12 @@ def _render_backtest_tab() -> None:
             ]
         )
         st.markdown(
-            f'''<div class="alpha-grid">{summary_cards}</div>''',
+            f"""<div class="alpha-grid">{summary_cards}</div>""",
             unsafe_allow_html=True,
         )
 
     for job in jobs:
-        title = (
-            f"{job.get('symbol', '-')}: {job.get('start', '?')} -> {job.get('end', '?')}"
-        )
+        title = f"{job.get('symbol', '-')}: {job.get('start', '?')} -> {job.get('end', '?')}"
         status = job.get("status", "unknown").upper()
         header = f"{title} - {status}"
         with st.expander(header, expanded=status in {"RUNNING", "QUEUED"}):
@@ -1445,9 +1459,7 @@ def _render_backtest_tab() -> None:
                 cols[0].metric("Total Trades", int(result.get("total_trades", 0)))
                 cols[1].metric("Win Rate", f"{result.get('win_rate', 0):.1f}%")
                 cols[2].metric("Total PnL", f"{result.get('total_pnl', 0):,.2f}")
-                cols[3].metric(
-                    "Max Drawdown", f"{result.get('max_drawdown', 0):.1f}%"
-                )
+                cols[3].metric("Max Drawdown", f"{result.get('max_drawdown', 0):.1f}%")
                 if "equity_curve" in result:
                     try:
                         curve = pd.DataFrame(result["equity_curve"])
@@ -1475,6 +1487,7 @@ def _render_backtest_tab() -> None:
                         use_container_width=True,
                         hide_index=True,
                     )
+
 
 def main() -> None:
     _style_app()
@@ -1594,6 +1607,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-

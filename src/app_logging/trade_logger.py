@@ -96,15 +96,25 @@ class TradeLogger:
         row = {key: "" for key in self.HEADERS}
         row.update(
             {
-                "timestamp_open": self._format_timestamp(trade_info.get("timestamp_open")),
-                "timestamp_close": self._format_timestamp(trade_info.get("timestamp_close")),
+                "timestamp_open": self._format_timestamp(
+                    trade_info.get("timestamp_open")
+                ),
+                "timestamp_close": self._format_timestamp(
+                    trade_info.get("timestamp_close")
+                ),
                 "symbol": trade_info.get("symbol", ""),
                 "side": trade_info.get("side", ""),
                 "size": self._format_float(trade_info.get("size"), default=""),
                 "notional": self._format_float(trade_info.get("notional"), default=""),
-                "entry_price": self._format_float(trade_info.get("entry_price"), default=""),
-                "exit_price": self._format_float(trade_info.get("exit_price"), default=""),
-                "realized_pnl": self._format_float(trade_info.get("realized_pnl"), default=""),
+                "entry_price": self._format_float(
+                    trade_info.get("entry_price"), default=""
+                ),
+                "exit_price": self._format_float(
+                    trade_info.get("exit_price"), default=""
+                ),
+                "realized_pnl": self._format_float(
+                    trade_info.get("realized_pnl"), default=""
+                ),
                 "realized_pnl_pct": self._format_float(
                     trade_info.get("realized_pnl_pct"), default=""
                 ),

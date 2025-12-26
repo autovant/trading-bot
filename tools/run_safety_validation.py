@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import json
-import subprocess
-import sys
 import os
 import re
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -109,7 +108,9 @@ SCENARIOS: List[Scenario] = [
 ]
 
 
-def run_pytest_scenario(scenario: Scenario, log_path: Path) -> subprocess.CompletedProcess:
+def run_pytest_scenario(
+    scenario: Scenario, log_path: Path
+) -> subprocess.CompletedProcess:
     cmd = [
         sys.executable,
         "-m",
@@ -191,9 +192,7 @@ def generate_report(results: List[dict]):
         lines.append(result["description"])
         lines.append("")
         lines.append(f"- Config overrides: `{result['config_overrides']}`")
-        lines.append(
-            f"- Expected tags: {', '.join(result['expected_tags']) or 'None'}"
-        )
+        lines.append(f"- Expected tags: {', '.join(result['expected_tags']) or 'None'}")
         lines.append(
             f"- Observed tags: {', '.join(sorted(result['observed_tags'])) or 'None'}"
         )
@@ -230,9 +229,7 @@ def main() -> int:
 
         tags = parse_log(log_path)
         observed_tags = set(tags.keys())
-        missing = [
-            tag for tag in scenario.expected_tags if tag not in observed_tags
-        ]
+        missing = [tag for tag in scenario.expected_tags if tag not in observed_tags]
         passed = completed is not None and completed.returncode == 0 and not missing
         notes = None
         if completed is None:
@@ -266,6 +263,8 @@ def main() -> int:
 if __name__ == "__main__":
     import os
 
-    parser = argparse.ArgumentParser(description="Run perps safety validation scenarios.")
+    parser = argparse.ArgumentParser(
+        description="Run perps safety validation scenarios."
+    )
     parser.parse_args()
     sys.exit(main())

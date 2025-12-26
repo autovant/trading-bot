@@ -1,5 +1,4 @@
 import logging
-import math
 import uuid
 from collections import deque
 from typing import Deque, Dict, List, Tuple
@@ -18,12 +17,21 @@ class StatisticalArbitrageStrategy(IStrategy):
     Goes long spread when price_a underperforms price_b beyond threshold and vice versa.
     """
 
-    def __init__(self, symbol_pair: Tuple[str, str], z_score_threshold: float = 2.0, lookback: int = 120):
+    def __init__(
+        self,
+        symbol_pair: Tuple[str, str],
+        z_score_threshold: float = 2.0,
+        lookback: int = 120,
+    ):
         self.symbol_pair = symbol_pair
         self.z_score_threshold = z_score_threshold
         self.lookback = lookback
-        self.prices: Dict[str, Deque[float]] = {s: deque(maxlen=lookback) for s in symbol_pair}
-        self.spread_state: int = 0  # 0 = flat, 1 = long spread (long A short B), -1 = short spread
+        self.prices: Dict[str, Deque[float]] = {
+            s: deque(maxlen=lookback) for s in symbol_pair
+        }
+        self.spread_state: int = (
+            0  # 0 = flat, 1 = long spread (long A short B), -1 = short spread
+        )
 
     async def on_tick(self, market_data: MarketData) -> List[Order]:
         if market_data.symbol not in self.symbol_pair:
@@ -41,12 +49,20 @@ class StatisticalArbitrageStrategy(IStrategy):
         if self.spread_state == 0:
             if z_score > self.z_score_threshold:
                 # Short A, Long B
-                orders.extend(self._build_pair_orders(short_symbol=a, long_symbol=b, qty=1.0, price=market_data.close))
+                orders.extend(
+                    self._build_pair_orders(
+                        short_symbol=a, long_symbol=b, qty=1.0, price=market_data.close
+                    )
+                )
                 self.spread_state = -1
                 logger.info("StatArb opening SHORT spread %s/%s z=%.2f", a, b, z_score)
             elif z_score < -self.z_score_threshold:
                 # Long A, Short B
-                orders.extend(self._build_pair_orders(short_symbol=b, long_symbol=a, qty=1.0, price=market_data.close))
+                orders.extend(
+                    self._build_pair_orders(
+                        short_symbol=b, long_symbol=a, qty=1.0, price=market_data.close
+                    )
+                )
                 self.spread_state = 1
                 logger.info("StatArb opening LONG spread %s/%s z=%.2f", a, b, z_score)
         else:
@@ -74,7 +90,9 @@ class StatisticalArbitrageStrategy(IStrategy):
         std = series.std()
         return float((series[-1] - mean) / std) if std > 0 else 0.0
 
-    def _build_pair_orders(self, short_symbol: str, long_symbol: str, qty: float, price: float) -> List[Order]:
+    def _build_pair_orders(
+        self, short_symbol: str, long_symbol: str, qty: float, price: float
+    ) -> List[Order]:
         return [
             Order(
                 id=str(uuid.uuid4()),
@@ -101,9 +119,17 @@ class StatisticalArbitrageStrategy(IStrategy):
         a, b = self.symbol_pair
         if self.spread_state == 1:
             # Long A / Short B -> close by selling A, buying B
-            orders.extend(self._build_pair_orders(short_symbol=a, long_symbol=b, qty=1.0, price=self.prices[a][-1]))
+            orders.extend(
+                self._build_pair_orders(
+                    short_symbol=a, long_symbol=b, qty=1.0, price=self.prices[a][-1]
+                )
+            )
         elif self.spread_state == -1:
             # Short A / Long B -> close by buying A, selling B
-            orders.extend(self._build_pair_orders(short_symbol=b, long_symbol=a, qty=1.0, price=self.prices[b][-1]))
+            orders.extend(
+                self._build_pair_orders(
+                    short_symbol=b, long_symbol=a, qty=1.0, price=self.prices[b][-1]
+                )
+            )
         self.spread_state = 0
         return orders

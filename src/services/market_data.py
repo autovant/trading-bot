@@ -1,16 +1,22 @@
 import asyncio
 import logging
-from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Optional
 
+from src.config import TradingBotConfig
 from src.exchange import ExchangeClient
 from src.messaging import MessagingClient
-from src.config import TradingBotConfig
 
 logger = logging.getLogger(__name__)
 
+
 class MarketDataPublisher:
-    def __init__(self, config: TradingBotConfig, exchange: ExchangeClient, messaging: MessagingClient):
+    def __init__(
+        self,
+        config: TradingBotConfig,
+        exchange: ExchangeClient,
+        messaging: MessagingClient,
+    ):
         self.config = config
         self.exchange = exchange
         self.messaging = messaging
@@ -48,9 +54,9 @@ class MarketDataPublisher:
                         "bid_size": float(ticker.get("bidVolume", 0.0) or 0.0),
                         "ask_size": float(ticker.get("askVolume", 0.0) or 0.0),
                         "last_price": float(ticker.get("last", 0.0) or 0.0),
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
-                    
+
                     await self.messaging.publish("market.data", order_book_data)
 
                 await asyncio.sleep(1.0)

@@ -1,8 +1,8 @@
 import numpy as np
 import pandas as pd
 
-from tools.backtest_perps import PerpsBacktest
 from src.config import PerpsConfig
+from tools.backtest_perps import PerpsBacktest
 
 
 def _build_ltf_series() -> pd.DataFrame:
@@ -21,7 +21,13 @@ def _build_ltf_series() -> pd.DataFrame:
     low = prices - 0.6
 
     return pd.DataFrame(
-        {"open": prices, "high": high, "low": low, "close": prices, "volume": np.full(periods, 1500.0)},
+        {
+            "open": prices,
+            "high": high,
+            "low": low,
+            "close": prices,
+            "volume": np.full(periods, 1500.0),
+        },
         index=idx,
     )
 

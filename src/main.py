@@ -2,25 +2,37 @@ import asyncio
 import logging
 import signal
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, List, Optional
 
 import aiohttp
 
-from src.config import get_config, TradingBotConfig
+from src.config import TradingBotConfig, get_config
+from src.container import Container
 from src.database import DatabaseManager
 from src.exchange import ExchangeClient
-from src.exchange import ExchangeClient
-from src.messaging import MessagingClient, MockMessagingClient
-from src.strategy import TradingStrategy, db_row_to_strategy_config
+from src.logging_config import setup_logging
+from src.messaging import MessagingClient
 from src.paper_trader import PaperBroker
-from src.services.perps import PerpsService
 from src.presets import get_preset_strategies
-from typing import List, Any, Optional
+from src.services.market_data import MarketDataPublisher
+from src.services.perps import PerpsService
+from src.strategy import TradingStrategy
+
+"""
+Main entry point for the Trading Bot.
+
+This module orchestrates the trading system, including:
+- Initialization of all services (Database, Exchange, Messaging, Strategy)
+- Configuration management and hot-reloading
+- Main event loop for the trading cycle
+- Signal handling for graceful shutdown
+"""
 
 def _create_paper_broker(
-    config: TradingBotConfig,
-    database: DatabaseManager,
-    run_id: str
+
+    config: TradingBotConfig, database: DatabaseManager, run_id: str
 ) -> PaperBroker:
     """Factory to create a PaperBroker instance."""
     return PaperBroker(
@@ -29,8 +41,9 @@ def _create_paper_broker(
         mode=config.app_mode,
         run_id=run_id,
         initial_balance=config.backtesting.initial_balance,
-        risk_config=config.risk_management
+        risk_config=config.risk_management,
     )
+
 
 def build_trading_strategy(
     config: TradingBotConfig,
@@ -39,7 +52,7 @@ def build_trading_strategy(
     messaging: MessagingClient,
     paper_broker: Optional[PaperBroker],
     run_id: str,
-    strategy_configs: List[Any]
+    strategy_configs: List[Any],
 ) -> TradingStrategy:
     """Factory to create a TradingStrategy instance."""
     return TradingStrategy(
@@ -49,112 +62,62 @@ def build_trading_strategy(
         messaging=messaging,
         paper_broker=paper_broker,
         run_id=run_id,
-        strategy_configs=strategy_configs
+        strategy_configs=strategy_configs,
     )
 
 
-
-
-
-from src.services.market_data import MarketDataPublisher
-
 logger = logging.getLogger(__name__)
 
+
 class TradingEngine:
+    """
+    Core trading engine that manages the lifecycle of all services.
+
+    Attributes:
+        running (bool): Flag indicating if the engine is active.
+        config (TradingBotConfig): Current system configuration.
+        container (Container): Dependency injection container.
+    """
+
     def __init__(self) -> None:
+
         self.running = False
-        self.config: TradingBotConfig = None
-        self.exchange: ExchangeClient = None
-        self.database: DatabaseManager = None
-        self.messaging: MessagingClient = None
-        self.strategy: TradingStrategy = None
-        self.paper_broker: PaperBroker = None
-        self.perps_service: PerpsService = None
-        self.market_data_publisher: MarketDataPublisher = None
-        self.session: aiohttp.ClientSession = None
-        self.run_id: str = None
-        self._last_config_mtime = 0
-
-
-
+        self.config: Optional[TradingBotConfig] = None
+        self.exchange: Optional[ExchangeClient] = None
+        self.database: Optional[DatabaseManager] = None
+        self.messaging: Optional[MessagingClient] = None
+        self.strategy: Optional[TradingStrategy] = None
+        self.paper_broker: Optional[PaperBroker] = None
+        self.perps_service: Optional[PerpsService] = None
+        self.market_data_publisher: Optional[MarketDataPublisher] = None
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.run_id: Optional[str] = None
+        self._last_config_mtime: float = 0.0
 
     async def initialize(self):
         logger.info("Initializing trading engine...")
         try:
-            self.config = get_config()
+            config = get_config()
+            setup_logging(config)
+
             self._last_config_mtime = Path("config/strategy.yaml").stat().st_mtime
 
-            self.session = aiohttp.ClientSession()
+            # Initialize Container
+            self.container = Container(config)
+            run_id = self.run_id or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+            await self.container.initialize(run_id)
 
-            # Initialize Database
-            self.database = DatabaseManager(self.config.database.path)
-            await self.database.initialize()
+            # Bind container services to self for backward compat / ease of access
+            self.config = self.container.config
+            self.database = self.container.database
+            self.messaging = self.container.messaging
+            self.paper_broker = self.container.paper_broker
+            self.exchange = self.container.exchange
+            self.strategy = self.container.strategy
+            self.session = self.container.session
+            self.run_id = self.container.run_id
 
-            # Initialize Messaging
-            messaging_config = {"servers": self.config.messaging.servers}
-            try:
-                self.messaging = MessagingClient(messaging_config)
-                await self.messaging.connect()
-            except Exception as e:
-                logger.error(f"Failed to connect to NATS: {e}. Falling back to MockMessagingClient.")
-                self.messaging = MockMessagingClient()
-                await self.messaging.connect()
-
-            # Initialize PaperBroker if needed
-            if self.config.app_mode != "live":
-                self.paper_broker = _create_paper_broker(
-                    self.config,
-                    self.database,
-                    self.run_id or "default_run"
-                )
-
-            # Initialize Exchange
-            self.exchange = ExchangeClient(
-                self.config.exchange,
-                app_mode=self.config.app_mode,
-                paper_broker=self.paper_broker
-            )
-            
-            # Load strategies (DB > YAML)
-            active_strategies = []
-            
-            # Try DB first
-            try:
-                db_strategies = await self.database.list_strategies()
-                active_db_strategies = [s for s in db_strategies if s.is_active]
-                
-                if active_db_strategies:
-                    logger.info(f"Loading {len(active_db_strategies)} active strategies from DB")
-                    for s in active_db_strategies:
-                        cfg = db_row_to_strategy_config(s)
-                        if cfg:
-                            active_strategies.append(cfg)
-            except Exception as e:
-                logger.error(f"Failed to load strategies from DB: {e}")
-
-            # Fallback to YAML if no DB strategies
-            if not active_strategies:
-                presets = get_preset_strategies()
-                if self.config.strategy.active_strategies:
-                    for name in self.config.strategy.active_strategies:
-                        preset = next((p for p in presets if p.name == name), None)
-                        if preset:
-                            active_strategies.append(preset)
-                            logger.info(f"Activated strategy from YAML: {name}")
-                        else:
-                            logger.warning(f"Strategy {name} not found in presets.")
-
-            self.strategy = build_trading_strategy(
-                self.config,
-                self.exchange,
-                self.database,
-                self.messaging,
-                self.paper_broker,
-                self.run_id,
-                active_strategies
-            )
-
-            if hasattr(self.config, 'perps'):
+            if hasattr(self.config, "perps"):
                 logger.info("Initializing PerpsService...")
                 try:
                     self.perps_service = PerpsService(
@@ -172,15 +135,15 @@ class TradingEngine:
             # Initialize Market Data Publisher
             logger.info("Initializing MarketDataPublisher...")
             self.market_data_publisher = MarketDataPublisher(
-                self.config,
-                self.exchange,
-                self.messaging
+                self.config, self.exchange, self.messaging
             )
             await self.market_data_publisher.start()
             logger.info("MarketDataPublisher started.")
 
             # Subscribe to bot control commands
-            await self.messaging.subscribe("command.bot.halt", self._handle_halt_command)
+            await self.messaging.subscribe(
+                "command.bot.halt", self._handle_halt_command
+            )
 
             logger.info("Trading engine initialized successfully")
 
@@ -200,21 +163,25 @@ class TradingEngine:
             logger.info("Reloading configuration...")
             try:
                 new_config = get_config()
-                
+
                 # 1. Load strategies from DB (Precedence: DB > YAML)
                 active_strategies = []
                 try:
                     db_strategies = await self.database.list_strategies()
                     active_db_strategies = [s for s in db_strategies if s.is_active]
-                    
+
                     if active_db_strategies:
-                        logger.info(f"Loading {len(active_db_strategies)} active strategies from DB")
+                        logger.info(
+                            f"Loading {len(active_db_strategies)} active strategies from DB"
+                        )
                         for s in active_db_strategies:
                             cfg = db_row_to_strategy_config(s)
                             if cfg:
                                 active_strategies.append(cfg)
                 except Exception as e:
-                    logger.error(f"Failed to load strategies from DB during reload: {e}")
+                    logger.error(
+                        f"Failed to load strategies from DB during reload: {e}"
+                    )
 
                 if not active_strategies:
                     presets = get_preset_strategies()
@@ -229,43 +196,43 @@ class TradingEngine:
                 new_paper_broker = None
                 if new_config.app_mode != "live":
                     new_paper_broker = _create_paper_broker(
-                        new_config, 
-                        self.database, 
-                        self.run_id or "default_run"
+                        new_config, self.database, self.run_id or "default_run"
                     )
 
                 # 3. Re-init Exchange if mode changed or broker changed
                 new_exchange = self.exchange
                 mode_changed = new_config.app_mode != self.config.app_mode
-                
+
                 if mode_changed:
-                    logger.info(f"App mode changed to {new_config.app_mode}. Re-initializing Exchange...")
+                    logger.info(
+                        f"App mode changed to {new_config.app_mode}. Re-initializing Exchange..."
+                    )
                     if self.exchange:
                         await self.exchange.close()
                     new_exchange = ExchangeClient(
-                        new_config.exchange, 
-                        app_mode=new_config.app_mode, 
-                        paper_broker=new_paper_broker
+                        new_config.exchange,
+                        app_mode=new_config.app_mode,
+                        paper_broker=new_paper_broker,
                     )
                     await new_exchange.initialize()
                 elif new_paper_broker and self.exchange:
                     # If we have a new paper broker but mode didn't change (e.g. config update),
                     # we should update the exchange's broker reference if it's in paper mode.
-                    # But ExchangeClient doesn't expose a setter. 
+                    # But ExchangeClient doesn't expose a setter.
                     # For safety, if we have a new paper broker, let's re-init exchange to be safe.
-                    # Or we can just assume ExchangeClient holds a reference? 
+                    # Or we can just assume ExchangeClient holds a reference?
                     # Actually, ExchangeClient uses paper_broker for order execution.
                     # If we replace paper_broker, we MUST update ExchangeClient.
                     if new_config.app_mode != "live":
-                         logger.info("Paper broker updated. Re-initializing Exchange...")
-                         if self.exchange:
+                        logger.info("Paper broker updated. Re-initializing Exchange...")
+                        if self.exchange:
                             await self.exchange.close()
-                         new_exchange = ExchangeClient(
-                            new_config.exchange, 
-                            app_mode=new_config.app_mode, 
-                            paper_broker=new_paper_broker
+                        new_exchange = ExchangeClient(
+                            new_config.exchange,
+                            app_mode=new_config.app_mode,
+                            paper_broker=new_paper_broker,
                         )
-                         await new_exchange.initialize()
+                        await new_exchange.initialize()
 
                 # 4. Build new Strategy
                 new_strategy = build_trading_strategy(
@@ -275,7 +242,7 @@ class TradingEngine:
                     self.messaging,
                     new_paper_broker,
                     self.run_id,
-                    active_strategies
+                    active_strategies,
                 )
 
                 # 5. Atomic Swap
@@ -284,7 +251,10 @@ class TradingEngine:
                 self.paper_broker = new_paper_broker
                 self.strategy = new_strategy
                 self._last_config_mtime = current_mtime
-                
+
+                if self.perps_service:
+                    self.perps_service.exchange = new_exchange
+
                 logger.info("Configuration reloaded successfully")
 
             except Exception as e:
@@ -347,7 +317,7 @@ class TradingEngine:
         logger.warning("Received HALT command via NATS")
         if self.perps_service:
             await self.perps_service.halt()
-        
+
         # Also disable in config to prevent restart
         # We can't easily write to config here without reloading logic interfering,
         # but api_server should have already updated the config file.

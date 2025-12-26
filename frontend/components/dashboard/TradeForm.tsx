@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { cn } from "@/utils/cn";
-import { Wallet, Settings2, ArrowRightLeft, Loader2 } from "lucide-react";
+import { Wallet, Loader2 } from "lucide-react";
 import { api } from "@/utils/api";
 import { useMarketData } from "@/contexts/MarketDataContext";
 import { useAccount } from "@/contexts/AccountContext";
@@ -23,7 +23,7 @@ const TradeForm = () => {
         if (lastPrice && !price) {
             setPrice(lastPrice.toString());
         }
-    }, [lastPrice]);
+    }, [lastPrice, price]);
 
     const handleSubmit = async () => {
         setLoading(true);
@@ -36,8 +36,9 @@ const TradeForm = () => {
                 price: orderType === "limit" ? parseFloat(price) : undefined
             });
             alert("Order submitted successfully!");
-        } catch (e: any) {
-            alert(`Failed to place order: ${e.message}`);
+        } catch (e: unknown) {
+            const message = e instanceof Error ? e.message : 'Unknown error';
+            alert(`Failed to place order: ${message}`);
         } finally {
             setLoading(false);
         }

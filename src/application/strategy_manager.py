@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from typing import Awaitable, Callable, Dict, Optional
 
@@ -70,7 +69,9 @@ class StrategyManager:
                 equity = self.execution_engine.mark_to_market(
                     {data.symbol: data.close}, data.timestamp
                 )
-                positions = [p.dict() for p in await self.execution_engine.get_positions()]
+                positions = [
+                    p.model_dump() for p in await self.execution_engine.get_positions()
+                ]
             except Exception:
                 logger.exception("Failed to mark-to-market after tick")
 

@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   postgres:
-    image: postgres:13
+    image: timescale/timescaledb-ha:pg14-latest
     container_name: postgres
     restart: unless-stopped
     environment:
@@ -21,7 +21,7 @@ services:
     ports:
       - "4222:4222"
       - "8222:8222"
-    command: ["--http_port", "8222"]
+    command: [ "--http_port", "8222" ]
 
   strategy-engine:
     build:
@@ -29,12 +29,7 @@ services:
       dockerfile: Dockerfile
     container_name: strategy-engine
     restart: unless-stopped
-    command:
-      [
-        "python",
-        "-m",
-        "src.main",
-      ]
+    command: [ "python3", "-m", "src.main" ]
     environment:
       APP_MODE: ${APP_MODE:-paper}
       PYTHONPATH: /app
@@ -61,17 +56,7 @@ services:
     environment:
       APP_MODE: ${APP_MODE:-paper}
       PYTHONPATH: /app
-    command:
-      [
-        "python",
-        "-m",
-        "uvicorn",
-        "src.services.execution:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8080",
-      ]
+    command: [ "python3", "-m", "uvicorn", "src.services.execution:app", "--host", "0.0.0.0", "--port", "8080" ]
     depends_on:
       - nats
       - postgres
@@ -94,17 +79,7 @@ services:
     environment:
       APP_MODE: ${APP_MODE:-paper}
       PYTHONPATH: /app
-    command:
-      [
-        "python",
-        "-m",
-        "uvicorn",
-        "src.services.feed:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8081",
-      ]
+    command: [ "python3", "-m", "uvicorn", "src.services.feed:app", "--host", "0.0.0.0", "--port", "8081" ]
     depends_on:
       - nats
     ports:
@@ -116,37 +91,32 @@ services:
       - ./src:/app/src:ro
       - ./config:/app/config:ro
 
-  ops-api:
+  api-server:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: ops-api
+    container_name: api-server
     restart: unless-stopped
     environment:
       APP_MODE: ${APP_MODE:-paper}
       PYTHONPATH: /app
-    command:
-      [
-        "python",
-        "-m",
-        "uvicorn",
-        "src.ops_api_service:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8082",
-      ]
+      API_KEY: ${API_KEY:-secret-key}
+      POSTGRES_USER: tradingbot
+      POSTGRES_PASSWORD: tradingbot
+      POSTGRES_DB: tradingbot
+    command: [ "python3", "-m", "uvicorn", "src.api_server:app", "--host", "0.0.0.0", "--port", "8000" ]
     ports:
-      - "8082:8082"
+      - "8000:8000"
     depends_on:
       - nats
       - postgres
-    read_only: true
+    read_only: false
     tmpfs:
       - /tmp
     volumes:
       - ./config:/app/config
       - ./data:/app/data
+      - ./src:/app/src:ro
 
   dash:
     build:
@@ -162,7 +132,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp
-    command: ["streamlit", "run", "dashboard/app.py"]
+    command: [ "python3", "-m", "streamlit", "run", "dashboard/app.py" ]
     depends_on:
       - strategy-engine
     volumes:
@@ -177,17 +147,7 @@ services:
     environment:
       APP_MODE: ${APP_MODE:-paper}
       PYTHONPATH: /app
-    command:
-      [
-        "python",
-        "-m",
-        "uvicorn",
-        "src.services.reporter:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8083",
-      ]
+    command: [ "python3", "-m", "uvicorn", "src.services.reporter:app", "--host", "0.0.0.0", "--port", "8083" ]
     depends_on:
       - nats
     ports:
@@ -209,17 +169,7 @@ services:
     environment:
       APP_MODE: ${APP_MODE:-paper}
       PYTHONPATH: /app
-    command:
-      [
-        "python",
-        "-m",
-        "uvicorn",
-        "src.services.risk:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8084",
-      ]
+    command: [ "python3", "-m", "uvicorn", "src.services.risk:app", "--host", "0.0.0.0", "--port", "8084" ]
     depends_on:
       - nats
     ports:
@@ -240,17 +190,7 @@ services:
     environment:
       APP_MODE: ${APP_MODE:-replay}
       PYTHONPATH: /app
-    command:
-      [
-        "python",
-        "-m",
-        "uvicorn",
-        "src.services.replay:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8085",
-      ]
+    command: [ "python3", "-m", "uvicorn", "src.services.replay:app", "--host", "0.0.0.0", "--port", "8085" ]
     depends_on:
       - nats
     read_only: true

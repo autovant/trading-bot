@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
+
 class ExchangeAdapter(ABC):
     """
     Abstract base class for exchange adapters.
@@ -35,7 +36,7 @@ class ExchangeAdapter(ABC):
         order_type: str,
         qty: float,
         price: Optional[float] = None,
-        reduce_only: bool = False
+        reduce_only: bool = False,
     ) -> Dict[str, Any]:
         """Place a new order."""
         pass

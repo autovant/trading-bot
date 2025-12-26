@@ -1,9 +1,11 @@
 import json
 import logging
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
 import pandas as pd
-from src.exchanges.zoomex_v3 import ZoomexV3Client, ZoomexError, Precision
+import pytest
+
+from src.exchanges.zoomex_v3 import Precision, ZoomexError, ZoomexV3Client
 
 
 @pytest.fixture
@@ -13,10 +15,9 @@ def mock_session():
 
 @pytest.fixture
 def client(mock_session):
-    with patch.dict("os.environ", {
-        "ZOOMEX_API_KEY": "test_key",
-        "ZOOMEX_API_SECRET": "test_secret"
-    }):
+    with patch.dict(
+        "os.environ", {"ZOOMEX_API_KEY": "test_key", "ZOOMEX_API_SECRET": "test_secret"}
+    ):
         return ZoomexV3Client(mock_session)
 
 
@@ -65,15 +66,15 @@ async def test_get_klines_success(client, mock_session):
         )
     )
     mock_response.raise_for_status = MagicMock()
-    
+
     mock_cm = MagicMock()
     mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
     mock_cm.__aexit__ = AsyncMock(return_value=None)
-    
+
     mock_session.request = MagicMock(return_value=mock_cm)
-    
+
     df = await client.get_klines("BTCUSDT", "5", 100)
-    
+
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 2
     assert list(df.columns) == ["open", "high", "low", "close", "volume"]
@@ -92,13 +93,13 @@ async def test_request_api_error(client, mock_session):
         )
     )
     mock_response.raise_for_status = MagicMock()
-    
+
     mock_cm = MagicMock()
     mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
     mock_cm.__aexit__ = AsyncMock(return_value=None)
-    
+
     mock_session.request = MagicMock(return_value=mock_cm)
-    
+
     with pytest.raises(ZoomexError):
         await client.get_klines("INVALID", "5", 100)
 

@@ -15,7 +15,7 @@ export const TradingChart: React.FC<ChartProps> = ({ className }) => {
     const chartRef = useRef<IChartApi | null>(null);
     const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
     const [timeframe, setTimeframe] = useState("15m");
-    const [isLoading, setIsLoading] = useState(true);
+    const [, setIsLoading] = useState(true);
 
     const { lastPrice, isConnected, marketData } = useMarketData();
     const symbol = marketData?.symbol || "BTCUSDT";
@@ -49,48 +49,49 @@ export const TradingChart: React.FC<ChartProps> = ({ className }) => {
 
         const chart = createChart(chartContainerRef.current, {
             layout: {
-                background: { type: ColorType.Solid, color: '#0a0a0a' },
-                textColor: '#525252',
-                fontFamily: 'JetBrains Mono, monospace',
+                background: { type: ColorType.Solid, color: '#0b1020' },
+                textColor: '#9fb3ce',
+                fontFamily: 'Space Grotesk, JetBrains Mono, monospace',
             },
             grid: {
-                vertLines: { color: '#1f1f1f' },
-                horzLines: { color: '#1f1f1f' },
+                vertLines: { color: '#1c2639' },
+                horzLines: { color: '#1c2639' },
             },
             width: chartContainerRef.current.clientWidth,
             height: chartContainerRef.current.clientHeight,
             crosshair: {
                 mode: CrosshairMode.Normal,
                 vertLine: {
-                    color: '#333',
+                    color: '#2b3348',
                     width: 1,
                     style: 3,
-                    labelBackgroundColor: '#0066FF',
+                    labelBackgroundColor: '#7DF3C6',
                 },
                 horzLine: {
-                    color: '#333',
+                    color: '#2b3348',
                     width: 1,
                     style: 3,
-                    labelBackgroundColor: '#0066FF',
+                    labelBackgroundColor: '#7DF3C6',
                 },
             },
             timeScale: {
-                borderColor: '#1f1f1f',
+                borderColor: '#1c2639',
                 timeVisible: true,
             },
             rightPriceScale: {
-                borderColor: '#1f1f1f',
+                borderColor: '#1c2639',
+                textColor: '#cbd5e1',
             },
         });
 
         chartRef.current = chart;
 
         const newSeries = chart.addCandlestickSeries({
-            upColor: '#00C853',
-            downColor: '#FF3D00',
+            upColor: '#52E3B8',
+            downColor: '#F76668',
             borderVisible: false,
-            wickUpColor: '#00C853',
-            wickDownColor: '#FF3D00',
+            wickUpColor: '#52E3B8',
+            wickDownColor: '#F76668',
         });
 
         seriesRef.current = newSeries;
@@ -121,36 +122,56 @@ export const TradingChart: React.FC<ChartProps> = ({ className }) => {
     }, [lastPrice]);
 
     return (
-        <div className={cn("relative w-full h-full bg-card overflow-hidden group", className)}>
+        <div className={cn("relative w-full h-full overflow-hidden bg-gradient-to-b from-[#0d1324] via-[#0b0f1d] to-[#090d17] group", className)}>
+            <div className="absolute inset-x-0 top-0 h-16 bg-gradient-to-b from-white/5 to-transparent pointer-events-none" />
+
             {/* Toolbar */}
-            <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-card/80 backdrop-blur border border-card-border rounded-lg p-1">
-                <div className="flex items-center gap-1 border-r border-card-border pr-2 mr-1">
-                    <div className="w-5 h-5 rounded bg-brand/20 flex items-center justify-center text-[10px] font-bold text-brand">B</div>
-                    <span className="text-xs font-bold text-white">BTC-PERP</span>
+            <div className="absolute top-3 left-3 z-10 flex flex-wrap items-center gap-2 rounded-full border border-card-border/70 bg-card/80 px-3 py-2 shadow-[0_10px_40px_-24px_rgba(0,0,0,0.8)]">
+                <div className="flex items-center gap-2 pr-3 border-r border-card-border/70">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-card-border/60 bg-brand/10 text-brand font-semibold text-xs">
+                        {symbol.slice(0, 3)}
+                    </div>
+                    <div className="leading-tight">
+                        <div className="text-[11px] uppercase tracking-[0.18em] text-gray-400">Symbol</div>
+                        <div className="text-xs font-semibold text-white">{symbol}</div>
+                    </div>
                 </div>
 
-                <div className="h-4 w-px bg-gray-800" />
-
-                <div className="flex gap-1">
+                <div className="flex items-center gap-1">
                     {["1m", "5m", "15m", "1H", "4H", "D"].map((tf) => (
                         <button
                             key={tf}
                             onClick={() => setTimeframe(tf)}
                             className={cn(
-                                "px-2 py-1 text-[10px] font-medium rounded transition-colors",
-                                timeframe === tf ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300 hover:bg-white/5"
+                                "px-2.5 py-1 text-[11px] font-semibold rounded-full border border-transparent transition-colors",
+                                timeframe === tf
+                                    ? "bg-brand/20 text-white border-brand/40 shadow-[0_5px_20px_-10px_rgba(125,243,198,0.7)]"
+                                    : "text-gray-400 hover:text-white hover:border-card-border/70"
                             )}
                         >
                             {tf}
                         </button>
                     ))}
                 </div>
+
+                <div className="hidden sm:flex items-center gap-2 pl-3 ml-1 border-l border-card-border/70 text-[11px] text-gray-400">
+                    <div className={cn(
+                        "flex items-center gap-1 rounded-full px-2 py-1 border border-card-border/70",
+                        isConnected ? "text-trade-long" : "text-trade-short"
+                    )}>
+                        <span className="inline-block h-2 w-2 rounded-full animate-pulse" style={{ backgroundColor: isConnected ? "#52E3B8" : "#F76668" }} />
+                        {isConnected ? "Live" : "Reconnecting"}
+                    </div>
+                    <span className="text-gray-500">Depth limited to top-of-book</span>
+                </div>
             </div>
 
             {/* Loading / Connection State Overlay */}
             {!isConnected && (
-                <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-                    <div className="text-xs text-gray-400 animate-pulse">Connecting to Market Data...</div>
+                <div className="absolute inset-0 z-50 flex items-center justify-center bg-gradient-to-b from-[#0a0f1f]/90 to-[#060914]/95 backdrop-blur-sm">
+                    <div className="rounded-full border border-card-border/80 px-4 py-2 text-xs text-gray-300 animate-pulse bg-card/70">
+                        Connecting to market data...
+                    </div>
                 </div>
             )}
 

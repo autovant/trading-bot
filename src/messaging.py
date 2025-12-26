@@ -1,5 +1,6 @@
 """
 NATS messaging system for inter-service communication.
+supports "memory://" servers for single-process monolith mode.
 """
 
 from __future__ import annotations
@@ -8,7 +9,7 @@ import asyncio
 import importlib
 import json
 import logging
-from typing import Any, Awaitable, Callable, Dict, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:  # pragma: no cover - typing aides
     from nats.aio.msg import Msg as MsgT
@@ -29,16 +30,130 @@ except ImportError:  # pragma: no cover - optional dependency
     _NATSClientFactory = None
     _JetStreamContextFactory = None
     NATS_AVAILABLE = False
-    logging.warning("NATS client not available. Messaging will be disabled.")
+    logging.warning(
+        "NATS client not available. Messaging will be disabled unless memory mode is used."
+    )
 
 logger = logging.getLogger(__name__)
 
 
+# -------------------------------------------------------------------------
+# Memory Messaging Client (Monolith Mode)
+# -------------------------------------------------------------------------
+
+
+class MemoryMessagingClient:
+    """In-memory messaging client for single-process monolith mode."""
+
+    def __init__(self, config: Dict[str, Any] = None):
+        self.subscribers: Dict[str, List[Callable]] = {}
+        self.connected = False
+        self._loop = None
+
+    async def connect(self, timeout: float = 1.0):
+        self.connected = True
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        logger.info("Connected to In-Memory Messaging Bus")
+
+    async def close(self):
+        self.connected = False
+        # In monolith, we might not want to clear subscribers if we just 'close' one client wrapper
+        # but pure memory client should clear.
+        self.subscribers.clear()
+        logger.info("Closed In-Memory Messaging Bus")
+
+    async def publish(self, subject: str, message: Dict[str, Any]):
+        """Publish message to local subscribers."""
+        if not self.connected:
+            logger.warning("Attempted to publish to closed memory bus")
+            return
+
+        if subject not in self.subscribers:
+            return
+
+        # Create a mock NATS message object
+        data_bytes = json.dumps(message).encode("utf-8")
+
+        class MockMsg:
+            def __init__(self, data, subj):
+                self.data = data
+                self.subject = subj
+                self.reply = ""
+
+        msg = MockMsg(data_bytes, subject)
+
+        # Dispatch
+        for callback in self.subscribers[subject]:
+            if asyncio.iscoroutinefunction(callback):
+                asyncio.create_task(callback(msg))
+            else:
+                asyncio.create_task(asyncio.to_thread(callback, msg))
+
+    async def subscribe(self, subject: str, callback: Any) -> Any:
+        self.subscribers.setdefault(subject, []).append(callback)
+        logger.debug("Subscribed to %s in memory", subject)
+
+        class MockSubscription:
+            def __init__(self, client, subj, cb):
+                self.client = client
+                self.subject = subj
+                self.cb = cb
+
+            async def unsubscribe(self):
+                if self.subject in self.client.subscribers:
+                    if self.cb in self.client.subscribers[self.subject]:
+                        self.client.subscribers[self.subject].remove(self.cb)
+
+        return MockSubscription(self, subject, callback)
+
+    async def request(
+        self, subject: str, message: Dict[str, Any], timeout: float = 1.0
+    ) -> Optional[Dict[str, Any]]:
+        logger.warning("MemoryMessagingClient.request('%s') not implemented", subject)
+        return None
+
+
+# Singleton instance for monolith mode
+_memory_instance: Optional[MemoryMessagingClient] = None
+
+MockMessagingClient = MemoryMessagingClient
+
+
+def get_memory_client(config: Dict[str, Any] = None) -> MemoryMessagingClient:
+    global _memory_instance
+    if _memory_instance is None:
+        _memory_instance = MemoryMessagingClient(config)
+    return _memory_instance
+
+
+# -------------------------------------------------------------------------
+# Main Messaging Client
+# -------------------------------------------------------------------------
+
+
 class MessagingClient:
-    """NATS messaging client with resilience and auto-reconnect support."""
+    """NATS messaging client with resilience, auto-reconnect, and memory mode support."""
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
+
+        # Check for memory mode
+        servers = config.get("servers", [])
+        if (
+            servers
+            and isinstance(servers, list)
+            and any(s.startswith("memory://") for s in servers)
+        ):
+            self._delegate = get_memory_client(config)
+            self._is_memory = True
+            logger.info("MessagingClient initialized in Memory Mode")
+        else:
+            self._delegate = None
+            self._is_memory = False
+
         self.nc: Optional[Any] = (
             _NATSClientFactory() if callable(_NATSClientFactory) else None
         )
@@ -60,6 +175,8 @@ class MessagingClient:
         self._connect_timeout = float(config.get("connect_timeout", 2.0))
 
     def _is_nc_connected(self) -> bool:
+        if self._is_memory:
+            return self._delegate.connected
         return bool(
             self.nc
             and getattr(self.nc, "is_connected", False)
@@ -76,6 +193,8 @@ class MessagingClient:
         return min(delay, self._max_backoff)
 
     async def _restore_subscriptions(self) -> None:
+        if self._is_memory:
+            return
         if not self._needs_restore or not self._callbacks:
             self._needs_restore = False
             return
@@ -91,12 +210,37 @@ class MessagingClient:
         self._needs_restore = False
 
     async def _ensure_connection(self) -> bool:
+        if self._is_memory:
+            return self._delegate.connected
+
         if not NATS_AVAILABLE:
             return False
+        
+        # If we are connected, great.
         if self.connected and self._is_nc_connected():
             if self._needs_restore:
                 await self._restore_subscriptions()
             return True
+
+        # If NATS client exists and is NOT closed, it might be reconnecting.
+        # We should not call connect() again, but we also can't say we are "connected" for operations.
+        # However, if allow_reconnect is True, we rely on the client to reconnect.
+        if self.nc and not getattr(self.nc, "is_closed", True):
+             # It is open but disconnected. It might be reconnecting.
+             # We check if we consider ourselves "connected" (application state).
+             # If application thinks connected, but NC is not, we might update app state.
+             if self.connected: 
+                  # We were connected, but NC says no.
+                  # NATS client might be reconnecting.
+                  # If we return False, the caller (publish/request) will retry loop/backoff.
+                  return False
+             
+        # If we reach here, either self.nc is None, or it is Closed, or we are not 'connected' in app state
+        # and we want to try establishing connection.
+        
+        # Don't try to connect if it's already open (avoid error).
+        if self.nc and not getattr(self.nc, "is_closed", True):
+             return False
 
         try:
             await self.connect()
@@ -106,6 +250,11 @@ class MessagingClient:
         return self.connected and self._is_nc_connected()
 
     async def connect(self, timeout: Optional[float] = 10.0):
+        if self._is_memory:
+            await self._delegate.connect(timeout)
+            self.connected = True
+            return
+
         """Connect to NATS server with retry/backoff logic."""
 
         async def _connect_inner() -> None:
@@ -115,7 +264,9 @@ class MessagingClient:
 
             if self.nc is None:
                 if not callable(_NATSClientFactory):
-                    logger.warning("NATS client factory unavailable; messaging disabled.")
+                    logger.warning(
+                        "NATS client factory unavailable; messaging disabled."
+                    )
                     return
                 self.nc = _NATSClientFactory()
 
@@ -201,6 +352,11 @@ class MessagingClient:
 
     async def close(self):
         """Close NATS connection."""
+        if self._is_memory:
+            # Do not close delegate in monolith mode as it is shared
+            self.connected = False
+            return
+
         if not NATS_AVAILABLE:
             self.connected = False
             self.subscribers.clear()
@@ -230,6 +386,10 @@ class MessagingClient:
 
     async def publish(self, subject: str, message: Dict[str, Any]):
         """Publish a message to a subject with retry/backoff."""
+        if self._is_memory:
+            await self._delegate.publish(subject, message)
+            return
+
         if not NATS_AVAILABLE:
             logger.warning(
                 "NATS client not available. Dropping message for subject %s.",
@@ -284,6 +444,9 @@ class MessagingClient:
         self, subject: str, callback: Callable[[MsgT], Awaitable[None] | None]
     ) -> Optional[SubscriptionT]:
         """Subscribe to a subject."""
+        if self._is_memory:
+            return await self._delegate.subscribe(subject, callback)
+
         if not NATS_AVAILABLE:
             logger.warning(
                 "NATS client not available. Cannot subscribe to %s.", subject
@@ -312,8 +475,12 @@ class MessagingClient:
             if existing:
                 try:
                     await existing.unsubscribe()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(
+                        "Failed to unsubscribe existing subscription for %s: %s",
+                        subject,
+                        exc,
+                    )
 
             self._callbacks[subject] = message_handler
             sub = await self.nc.subscribe(subject, cb=message_handler)
@@ -328,6 +495,9 @@ class MessagingClient:
         self, subject: str, message: Dict[str, Any], timeout: float = 1.0
     ) -> Optional[Dict[str, Any]]:
         """Send a request and wait for a response with retry/backoff."""
+        if self._is_memory:
+            return await self._delegate.request(subject, message, timeout)
+
         if not NATS_AVAILABLE:
             logger.warning("NATS client not available. Request to %s skipped.", subject)
             return None
@@ -364,6 +534,8 @@ class MessagingClient:
             except asyncio.TimeoutError:
                 logger.warning("Request to %s timed out after %.2fs", subject, timeout)
                 return None
+
+
             except Exception as exc:
                 self._set_disconnected()
                 if attempts >= total_attempts:
@@ -386,23 +558,15 @@ class MessagingClient:
 
         return None
 
+    async def get_status(self) -> Dict[str, Any]:
+        """Get messaging system status."""
+        if self._is_memory:
+            return {"connected": self._delegate.connected, "backend": "memory"}
 
-class MockMessagingClient:
-    """Mock messaging client for when NATS is unavailable."""
-    
-    async def connect(self, timeout: float = 1.0):
-        logger.warning("Using MockMessagingClient (NATS unavailable)")
-
-    async def close(self):
-        pass
-
-    async def publish(self, subject: str, message: Dict[str, Any]):
-        logger.info(f"Mock publish to {subject}: {message}")
-
-    async def subscribe(self, subject: str, callback: Any):
-        logger.info(f"Mock subscribe to {subject}")
-        return None
-
-    async def request(self, subject: str, message: Dict[str, Any], timeout: float = 1.0):
-        logger.info(f"Mock request to {subject}: {message}")
-        return None
+        connected = self.connected and self._is_nc_connected()
+        return {
+            "connected": connected,
+            "backend": "nats" if NATS_AVAILABLE else "none",
+            "server": self.config.get("servers", ["unknown"]),
+            "subscriptions": len(self.subscribers),
+        }

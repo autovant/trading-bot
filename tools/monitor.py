@@ -55,13 +55,14 @@ class TradingMonitor:
         )
 
         self.session = aiohttp.ClientSession()
-        self.client = ZoomexV3Client(self.session, base_url=base_url, mode_name=self.mode)
+        self.client = ZoomexV3Client(
+            self.session, base_url=base_url, mode_name=self.mode
+        )
 
     async def get_account_info(self):
         equity = await self.client.get_wallet_equity()
         position_qty = await self.client.get_position_qty(
-            self.config.perps.symbol,
-            self.config.perps.positionIdx
+            self.config.perps.symbol, self.config.perps.positionIdx
         )
         return equity, position_qty
 
@@ -69,7 +70,7 @@ class TradingMonitor:
         df = await self.client.get_klines(
             symbol=self.config.perps.symbol,
             interval=self.config.perps.interval,
-            limit=100
+            limit=100,
         )
 
         if df.empty or len(df) < 35:
@@ -81,7 +82,7 @@ class TradingMonitor:
     async def display_dashboard(self):
         while True:
             try:
-                os.system('cls' if os.name == 'nt' else 'clear')
+                os.system("cls" if os.name == "nt" else "clear")
 
                 print("=" * 80)
                 print(f"{'Zoomex Trading Bot - Live Monitor':^80}")
@@ -111,7 +112,7 @@ class TradingMonitor:
                     print(f"  RSI: {signals['rsi']:.2f}")
                     print(f"  Volume: {signals['volume']:.2f}")
 
-                    if signals['long_signal']:
+                    if signals["long_signal"]:
                         print("\n  🟢 LONG SIGNAL ACTIVE")
                     else:
                         print("\n  ⚪ No signal")
@@ -120,10 +121,10 @@ class TradingMonitor:
                     print("\n💼 Active Position")
                     print("-" * 80)
                     print(f"  Quantity: {position_qty:.6f}")
-                    print(f"  Side: LONG")
+                    print("  Side: LONG")
 
                     if signals:
-                        current_price = signals['price']
+                        current_price = signals["price"]
                         tp_price = current_price * (1 + self.config.perps.takeProfitPct)
                         sl_price = current_price * (1 - self.config.perps.stopLossPct)
 

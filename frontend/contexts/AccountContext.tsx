@@ -1,8 +1,9 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState, useRef, ReactNode } from 'react';
+import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 import { ExecutionReport, Position, Order, AccountSummary } from '@/types';
 import { useWebSocket } from '@/hooks/useWebSocket';
+import { api } from '@/utils/api';
 
 interface AccountContextType {
     positions: Position[];
@@ -22,7 +23,7 @@ export const AccountDataProvider: React.FC<{ children: ReactNode }> = ({ childre
         equity: 10000, // Mock initial
         balance: 10000,
         unrealized_pnl: 0,
-        margin_used: 0,
+        used_margin: 0,
         free_margin: 10000,
         leverage: 10
     });
@@ -35,7 +36,7 @@ export const AccountDataProvider: React.FC<{ children: ReactNode }> = ({ childre
                 const data = await res.json();
                 // Map API response to Position type if needed
                 // Assuming API returns list of positions compatible with our type or we map it
-                const mappedPositions: Position[] = data.map((p: any) => ({
+                const mappedPositions: Position[] = data.map((p: { symbol: string; side: string; size: number; entry_price: number; mark_price: number; unrealized_pnl: number; percentage: number; mode: string }) => ({
                     symbol: p.symbol,
                     side: p.side,
                     size: p.size,
@@ -87,15 +88,53 @@ export const AccountDataProvider: React.FC<{ children: ReactNode }> = ({ childre
         }
     });
 
-    // Calculate summary based on positions
+    // Poll Account Summary
+    useEffect(() => {
+        const fetchAccount = async () => {
+            try {
+                const data = await api.getAccountSummary(); // You need to import api if not imported, or pass it in
+                setSummary(data);
+            } catch (e) {
+                console.error("Failed to fetch account summary:", e);
+            }
+        };
+
+        fetchAccount();
+        const interval = setInterval(fetchAccount, 2000); // Poll every 2s
+        return () => clearInterval(interval);
+    }, []);
+
+    // Calculate summary based on positions - OPTIONAL OVERRIDE or MERGE
+    // If backend provides full summary, we might rely on that. 
+    // However, unrealized_pnl from positions might be faster via WS.
+    // Let's use backend summary as base, and maybe override PnL if positions update faster?
+    // For now, let's trust the backend polling for simplicity, or just use WS for positions PnL updates.
+    // Actually, let's merge: use fetched summary, but if positions change, update PnL?
+    // The previous logic was:
+    /*
     useEffect(() => {
         const upnl = positions.reduce((acc, p) => acc + p.unrealized_pnl, 0);
         setSummary(prev => ({
             ...prev,
             unrealized_pnl: upnl,
             equity: prev.balance + upnl,
-            free_margin: prev.balance + upnl - prev.margin_used // Simplified
+            free_margin: prev.balance + upnl - prev.margin_used 
         }));
+    }, [positions]);
+    */
+    // We can keep this if we trust positions array more than 2s poll. 
+    // But `balance` comes from API.
+    // Let's keep the API poll for Balance/Margin, and let positions drive PnL/Equity for real-time feel.
+    useEffect(() => {
+        if (positions.length > 0) {
+            const upnl = positions.reduce((acc, p) => acc + p.unrealized_pnl, 0);
+            setSummary(prev => ({
+                ...prev,
+                unrealized_pnl: upnl,
+                equity: prev.balance + upnl, // Recalculate equity based on realtime PnL
+                free_margin: prev.balance + upnl - prev.used_margin // Update free margin too
+            }));
+        }
     }, [positions]);
 
     const executeOrder = React.useCallback(async (order: { symbol: string, side: 'buy' | 'sell', type: 'market' | 'limit', quantity: number, price?: number }) => {

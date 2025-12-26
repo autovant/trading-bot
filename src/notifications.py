@@ -1,9 +1,10 @@
 """
 Telegram notification system for live trading alerts.
 """
+
 import logging
-import asyncio
 from typing import Optional
+
 import aiohttp
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,9 @@ class TelegramNotifier:
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.enabled = bool(bot_token and chat_id)
-        self.base_url = f"https://api.telegram.org/bot{bot_token}" if bot_token else None
+        self.base_url = (
+            f"https://api.telegram.org/bot{bot_token}" if bot_token else None
+        )
 
     async def send_message(self, message: str) -> bool:
         """
@@ -29,11 +32,7 @@ class TelegramNotifier:
             return False
 
         url = f"{self.base_url}/sendMessage"
-        payload = {
-            "chat_id": self.chat_id,
-            "text": message,
-            "parse_mode": "Markdown"
-        }
+        payload = {"chat_id": self.chat_id, "text": message, "parse_mode": "Markdown"}
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -42,7 +41,9 @@ class TelegramNotifier:
                         logger.info("Telegram message sent successfully")
                         return True
                     else:
-                        logger.error(f"Failed to send Telegram message: {response.status}")
+                        logger.error(
+                            f"Failed to send Telegram message: {response.status}"
+                        )
                         return False
         except Exception as e:
             logger.error(f"Error sending Telegram message: {e}")

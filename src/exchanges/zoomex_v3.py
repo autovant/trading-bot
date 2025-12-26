@@ -49,7 +49,7 @@ class ZoomexV3Client:
         self.category = category
         self.max_retries = max_retries
         self.mode_name = mode_name
-        
+
         self._max_requests_per_second = max_requests_per_second
         self._max_requests_per_minute = max_requests_per_minute
         self._last_request_time = 0.0
@@ -65,10 +65,14 @@ class ZoomexV3Client:
 
     def _sign(self, payload: str) -> str:
         message = f"{payload}".encode()
+        if self.api_secret is None:
+            raise ZoomexError("Zoomex API secret not configured")
         secret = self.api_secret.encode()
         return hmac.new(secret, message, hashlib.sha256).hexdigest()
 
     def _headers(self, payload: str) -> Dict[str, str]:
+        if self.api_key is None:
+            raise ZoomexError("Zoomex API key not configured")
         timestamp = self._ts_ms()
         sign_payload = f"{timestamp}{self.api_key}{RECV_WINDOW}{payload}"
         signature = self._sign(sign_payload)
@@ -90,7 +94,7 @@ class ZoomexV3Client:
         signed: bool = False,
     ) -> Dict[str, Any]:
         await self._rate_limit()
-        
+
         url = f"{self.base_url}{endpoint}"
         body = json.dumps(payload or {}, separators=(",", ":")) if payload else ""
         headers = {}
@@ -167,7 +171,6 @@ class ZoomexV3Client:
         self._last_request_time = now
         self._request_count_minute += 1
 
-
     async def get_klines(
         self,
         symbol: str,
@@ -235,16 +238,16 @@ class ZoomexV3Client:
         if not data:
             return pd.DataFrame(columns=columns)
         df = pd.DataFrame(data, columns=columns)
-        df["start"] = pd.to_datetime(
-            df["start"].astype("int64"), unit="ms", utc=True
-        )
+        df["start"] = pd.to_datetime(df["start"].astype("int64"), unit="ms", utc=True)
         numeric_cols = ["open", "high", "low", "close", "volume"]
         df[numeric_cols] = df[numeric_cols].astype(float)
         df.set_index("start", inplace=True)
         df.sort_index(inplace=True)
         return df
 
-    async def set_leverage(self, symbol: str, buy: int = 1, sell: int = 1) -> Dict[str, Any]:
+    async def set_leverage(
+        self, symbol: str, buy: int = 1, sell: int = 1
+    ) -> Dict[str, Any]:
         payload = {
             "category": self.category,
             "symbol": symbol,
@@ -269,11 +272,15 @@ class ZoomexV3Client:
             "GET", "/v3/private/position/list", params=params, signed=True
         )
 
-    async def get_instruments_info(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+    async def get_instruments_info(
+        self, symbol: Optional[str] = None
+    ) -> Dict[str, Any]:
         params = {"category": self.category}
         if symbol:
             params["symbol"] = symbol
-        return await self._request("GET", "/v3/public/market/instruments-info", params=params)
+        return await self._request(
+            "GET", "/v3/public/market/instruments-info", params=params
+        )
 
     async def get_precision(self, symbol: str) -> Precision:
         info = await self.get_instruments_info(symbol=symbol)
@@ -298,7 +305,7 @@ class ZoomexV3Client:
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
     ) -> Dict[str, Any]:
-        payload = {
+        payload: Dict[str, Any] = {
             "category": self.category,
             "symbol": symbol,
             "side": side.capitalize(),
@@ -319,7 +326,6 @@ class ZoomexV3Client:
         return await self._request(
             "POST", "/v3/private/order/create", payload=payload, signed=True
         )
-
 
     async def get_wallet_equity(self) -> float:
         balance_data = await self.get_wallet_balance()
@@ -368,6 +374,7 @@ class ZoomexV3Client:
         return await self._request(
             "POST", "/v3/private/order/create", payload=payload, signed=True
         )
+
     async def close_position_reduce_only(
         self,
         *,
@@ -395,7 +402,9 @@ class ZoomexV3Client:
         self, symbol: str, position_idx: Optional[int] = None
     ) -> Dict[str, Any]:
         positions_data = await self.get_positions(symbol=symbol)
-        positions = positions_data.get("list", []) if isinstance(positions_data, dict) else []
+        positions = (
+            positions_data.get("list", []) if isinstance(positions_data, dict) else []
+        )
         match = None
         for pos in positions:
             if symbol and pos.get("symbol") != symbol:
@@ -424,7 +433,7 @@ class ZoomexV3Client:
                 if coin.get("coin") == "USDT":
                     available = float(coin.get("availableToWithdraw", "0"))
                     break
-        
+
         return {
             "marginRatio": margin_ratio,
             "availableBalance": available,

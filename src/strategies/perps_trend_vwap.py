@@ -1,9 +1,13 @@
 """
 Perps trend-following + VWAP strategy signals
 """
+
 from typing import Dict
+
 import pandas as pd
-from src.ta_indicators.ta_core import sma, rsi_ema, vwap
+
+from src.ta_indicators.ta_core import rsi_ema, sma, vwap
+
 
 def compute_signals(df: pd.DataFrame) -> Dict[str, float | bool]:
     if len(df) < 35:

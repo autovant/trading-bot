@@ -1,13 +1,14 @@
-import pytest
-from datetime import datetime, timezone, timedelta
 import logging
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
+import pytest
+
 from src.alerts.base import AlertSink
-from src.services.perps import PerpsService
-from src.config import PerpsConfig, TradingConfig, CrisisModeConfig
+from src.config import CrisisModeConfig, PerpsConfig, TradingConfig
 from src.exchanges.zoomex_v3 import Precision
 from src.risk.risk_manager import RiskManager
+from src.services.perps import PerpsService
 
 
 @pytest.mark.asyncio
@@ -42,7 +43,9 @@ async def test_check_position_pnl_runs_when_flat_and_updates_tracker():
     assert service.last_position_check_time is not None
     assert service.pnl_tracker.trade_history == []
 
-    service.last_position_check_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+    service.last_position_check_time = datetime.now(timezone.utc) - timedelta(
+        minutes=10
+    )
     service.equity_usdt = 1000.0
     await service._check_position_pnl()
 
@@ -161,7 +164,9 @@ async def test_risk_manager_blocks_order_submission():
     client = AsyncMock()
     client.get_margin_info = AsyncMock(return_value={"marginRatio": 0.0, "found": True})
     client.set_leverage = AsyncMock()
-    client.get_precision = AsyncMock(return_value=Precision(qty_step=0.001, min_qty=0.001))
+    client.get_precision = AsyncMock(
+        return_value=Precision(qty_step=0.001, min_qty=0.001)
+    )
     client.create_market_with_brackets = AsyncMock(return_value={"orderId": "123"})
 
     service = PerpsService(

@@ -25,7 +25,12 @@ class StrategyEnvelope:
     )
 
     def as_dict(self) -> Dict[str, Any]:
-        return {"name": self.name, "triggers": self.triggers, "logic": self.logic, "risk": self.risk}
+        return {
+            "name": self.name,
+            "triggers": self.triggers,
+            "logic": self.logic,
+            "risk": self.risk,
+        }
 
 
 class JSONStrategyRunner:
@@ -34,7 +39,9 @@ class JSONStrategyRunner:
     and delegate full backtests to DynamicStrategyEngine.
     """
 
-    def __init__(self, strategy: StrategyEnvelope, engine: Optional[DynamicStrategyEngine] = None):
+    def __init__(
+        self, strategy: StrategyEnvelope, engine: Optional[DynamicStrategyEngine] = None
+    ):
         self.strategy = strategy
         self.engine = engine or DynamicStrategyEngine()
         self.history: List[Dict[str, Any]] = []
@@ -126,7 +133,12 @@ class VolatilityBreakoutStrategy(JSONStrategyRunner):
                     "timeframe": "5m",
                     "operator": ">",
                     "value": 0,  # value ignored when compare_to is set
-                    "params": {"period": 20, "std": 2.0, "field": "close", "compare_to": "upper"},
+                    "params": {
+                        "period": 20,
+                        "std": 2.0,
+                        "field": "close",
+                        "compare_to": "upper",
+                    },
                 },
                 {
                     "indicator": "rsi",

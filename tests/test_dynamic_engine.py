@@ -1,23 +1,28 @@
+import asyncio
 import sys
-import os
-import asyncio
-import asyncio
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import polars as pl
-import sys
+import pytest
 
-# Add src to path
+# Add repo root to path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from src.strategies.dynamic_engine import DynamicStrategyEngine  # noqa: E402
 
 
+@pytest.mark.asyncio
 async def test_engine():
     engine = DynamicStrategyEngine()
 
-    dates = pl.datetime_range(start="2023-01-01", end="2023-01-02", interval="5m", eager=True)
+    dates = pl.datetime_range(
+        start=datetime(2023, 1, 1),
+        end=datetime(2023, 1, 2),
+        interval="5m",
+        eager=True,
+    )
     df = pl.DataFrame(
         {
             "timestamp": dates,
@@ -33,13 +38,25 @@ async def test_engine():
         "name": "Test Strategy",
         "triggers": [
             {"indicator": "rsi", "timeframe": "5m", "operator": "<", "value": 70},
-            {"indicator": "wavetrend_dot", "timeframe": "5m", "operator": "==", "value": "GREEN"},
+            {
+                "indicator": "wavetrend_dot",
+                "timeframe": "5m",
+                "operator": "==",
+                "value": "GREEN",
+            },
         ],
         "logic": "AND",
-        "risk": {"initial_capital": 10_000, "risk_per_trade_pct": 1, "stop_loss_pct": 1, "take_profit_pct": 2},
+        "risk": {
+            "initial_capital": 10_000,
+            "risk_per_trade_pct": 1,
+            "stop_loss_pct": 1,
+            "take_profit_pct": 2,
+        },
     }
 
-    result = await engine.run_backtest(strategy, "BTC/USDT", "2023-01-01", "2023-01-02", data=df)
+    result = await engine.run_backtest(
+        strategy, "BTC/USDT", "2023-01-01", "2023-01-02", data=df
+    )
     assert result["trades"] >= 0
     assert "pnl" in result
 

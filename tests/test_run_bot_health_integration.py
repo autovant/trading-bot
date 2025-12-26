@@ -22,11 +22,17 @@ def _build_bot(health_min_status="WARNING", strict=False):
         "config.yaml",
         {},
         best_configs_path="best.json",
-        risk_limits={"max_account_risk_pct": 0.02, "max_open_risk_pct": 0.05, "max_symbol_risk_pct": 0.03},
+        risk_limits={
+            "max_account_risk_pct": 0.02,
+            "max_open_risk_pct": 0.05,
+            "max_symbol_risk_pct": 0.03,
+        },
         trade_log_csv="trades.csv",
         health_settings=health_settings,
     )
-    bot.config = SimpleNamespace(perps=SimpleNamespace(symbol="BTCUSDT", exchange="zoomex"))
+    bot.config = SimpleNamespace(
+        perps=SimpleNamespace(symbol="BTCUSDT", exchange="zoomex")
+    )
     bot.overrides = {}
     return bot
 
@@ -46,7 +52,10 @@ def test_health_gate_blocks_non_strict(monkeypatch):
     monkeypatch.setattr(
         run_bot,
         "evaluate_symbols_health",
-        lambda *args, **kwargs: ({"BTCUSDT": {"status": "FAILING", "reasons": ["bad"]}}, {}),
+        lambda *args, **kwargs: (
+            {"BTCUSDT": {"status": "FAILING", "reasons": ["bad"]}},
+            {},
+        ),
     )
 
     with pytest.raises(SystemExit) as excinfo:
@@ -59,7 +68,10 @@ def test_health_gate_blocks_strict(monkeypatch):
     monkeypatch.setattr(
         run_bot,
         "evaluate_symbols_health",
-        lambda *args, **kwargs: ({"BTCUSDT": {"status": "WARNING", "reasons": ["gap"]}}, {}),
+        lambda *args, **kwargs: (
+            {"BTCUSDT": {"status": "WARNING", "reasons": ["gap"]}},
+            {},
+        ),
     )
 
     with pytest.raises(SystemExit) as excinfo:

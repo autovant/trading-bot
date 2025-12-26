@@ -1,28 +1,46 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState, useRef, ReactNode } from 'react';
-import { OrderBookData, MarketDataState } from '@/types';
+import React, { createContext, useContext, ReactNode } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { OrderBookData } from '@/types';
+import { AccountSummaryResponse, PositionResponse, OrderResponse } from '@/types/api';
 import { useWebSocket } from '@/hooks/useWebSocket';
 
-interface MarketDataContextType {
+// --- Types ---
+
+interface MarketContextState {
     marketData: OrderBookData | null;
     isConnected: boolean;
     lastPrice: number;
 }
 
-const MarketDataContext = createContext<MarketDataContextType | undefined>(undefined);
+const MarketDataContext = createContext<MarketContextState | undefined>(undefined);
+
+// --- Fetchers ---
+
+const fetchAccount = async (): Promise<AccountSummaryResponse> => {
+    const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000'}/api/account`);
+    if (!res.ok) throw new Error('Failed to fetch account');
+    return res.json();
+};
+
+const fetchPositions = async (): Promise<PositionResponse[]> => {
+    const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000'}/api/positions`);
+    if (!res.ok) throw new Error('Failed to fetch positions');
+    return res.json();
+};
+
+// --- Provider ---
 
 export const MarketDataProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-    // Use window.location.hostname to allow connecting from other devices/containers if needed, 
-    // but for now hardcode localhost as per existing code or make it configurable.
-    const wsUrl = `${process.env.NEXT_PUBLIC_WS_BASE_URL}/ws/market-data`;
+    const wsUrl = `${process.env.NEXT_PUBLIC_WS_BASE_URL || 'ws://localhost:8000'}/ws/market-data`;
 
+    // 1. WebSocket for Real-time Market Data
     const { lastMessage: marketData, isConnected } = useWebSocket<OrderBookData>(wsUrl, {
         shouldConnect: true,
         reconnectInterval: 3000,
         validator: (data: unknown): data is OrderBookData => {
-            // Basic shape check
-            return typeof data === 'object' && data !== null && 'symbol' in data && 'best_bid' in data;
+            return typeof data === 'object' && data !== null && 'symbol' in data;
         }
     });
 
@@ -39,10 +57,43 @@ export const MarketDataProvider: React.FC<{ children: ReactNode }> = ({ children
     );
 };
 
+// --- Hooks ---
+
 export const useMarketData = () => {
     const context = useContext(MarketDataContext);
     if (context === undefined) {
         throw new Error('useMarketData must be used within a MarketDataProvider');
     }
     return context;
+};
+
+export const useAccount = () => {
+    return useQuery({
+        queryKey: ['account'],
+        queryFn: fetchAccount,
+        refetchInterval: 5000,
+    });
+};
+
+const fetchOpenOrders = async (): Promise<OrderResponse[]> => {
+    // Assuming endpoint exists or we use a placeholder
+    const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000'}/api/orders?status=open`);
+    if (!res.ok) return []; // Fallback or throw
+    return res.json();
+};
+
+export const useOpenOrders = () => {
+    return useQuery({
+        queryKey: ['openOrders'],
+        queryFn: fetchOpenOrders,
+        refetchInterval: 3000,
+    });
+};
+
+export const usePositions = () => {
+    return useQuery({
+        queryKey: ['positions'],
+        queryFn: fetchPositions,
+        refetchInterval: 3000,
+    });
 };

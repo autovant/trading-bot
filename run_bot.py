@@ -19,24 +19,21 @@ import datetime
 import json
 import logging
 import os
-import threading
-import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 import aiohttp
-import yaml
 
-from src.config import PerpsConfig, get_config, TradingBotConfig
-from src.logging.trade_logger import TradeLogger
+from src.app_logging.trade_logger import TradeLogger
+from src.config import PerpsConfig, TradingBotConfig, get_config
 from src.risk.risk_manager import RiskManager
 from src.services.perps import PerpsService
 from src.state.daily_pnl_store import DailyPnlStore
 from src.state.symbol_health_store import SymbolHealthStore, _format_iso
 from tools.health_check_configs import evaluate_symbols_health
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -183,7 +180,7 @@ def start_runtime_health_monitor(
             reasons_text = ", ".join(reasons) or "unspecified"
 
             if status == "FAILING":
-                effective_cooldown = cooldown_minutes
+                effective_cooldown: float = float(cooldown_minutes)
                 if (
                     cooldown_backoff_multiplier
                     and prior_status == "FAILING"
@@ -236,11 +233,15 @@ def start_runtime_health_monitor(
         try:
             stat = trades_path.stat()
         except FileNotFoundError:
-            logger.debug("Runtime health: trades CSV not found at %s; skipping.", trades_path)
+            logger.debug(
+                "Runtime health: trades CSV not found at %s; skipping.", trades_path
+            )
             return False
         signature = (stat.st_mtime, stat.st_size)
         if last_trade_signature == signature:
-            logger.debug("Runtime health: no new trades since last check; skipping evaluation.")
+            logger.debug(
+                "Runtime health: no new trades since last check; skipping evaluation."
+            )
             return False
         last_trade_signature = signature
         return True
@@ -289,7 +290,9 @@ class TradingBot:
         self.best_configs_strict = best_configs_strict
         self.trade_log_csv = trade_log_csv
         self.health_settings = health_settings or {}
-        self.runtime_health_settings: RuntimeHealthSettings = runtime_health_settings or {}
+        self.runtime_health_settings: RuntimeHealthSettings = (
+            runtime_health_settings or {}
+        )
         self.risk_limits = risk_limits or {
             "max_account_risk_pct": 0.02,
             "max_open_risk_pct": 0.05,
@@ -309,6 +312,11 @@ class TradingBot:
         self.symbol_health_store: Optional[SymbolHealthStore] = None
         self.runtime_health_stop_event: Optional[threading.Event] = None
         self.runtime_health_thread: Optional[threading.Thread] = None
+
+    def _require_config(self) -> TradingBotConfig:
+        if self.config is None:
+            raise RuntimeError("TradingBot config not loaded; call initialize() first")
+        return self.config
 
     async def initialize(self):
         logger.info("=" * 60)
@@ -361,7 +369,9 @@ class TradingBot:
         if self.risk_limits.get("max_daily_loss_usd") and self.daily_pnl_store_path:
             daily_store = DailyPnlStore(self.daily_pnl_store_path)
             account_id = self._derive_account_id()
-            today_key = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+            today_key = datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y-%m-%d"
+            )
             current_pnl = daily_store.get_pnl(account_id, today_key)
             logger.info(
                 "DailyPnLStore initialized path=%s account_id=%s today=%s pnl=%.2f",
@@ -416,7 +426,8 @@ class TradingBot:
                 logger.warning(f"  Unknown override key: {key}")
 
     def _derive_account_id(self) -> str:
-        exchange = getattr(self.config.perps, "exchange", "unknown")
+        config = self._require_config()
+        exchange = getattr(config.perps, "exchange", "unknown")
         return f"{exchange}-{self.mode}"
 
     def _health_status_allows(self, status: str, min_status: str) -> bool:
@@ -440,7 +451,9 @@ class TradingBot:
         best_path = settings.get("best_configs_path") or self.best_configs_path
         trades_path = settings.get("trades_csv")
         if not trades_path and self.trade_logger:
-            trades_path = str(getattr(self.trade_logger, "csv_path", self.trade_log_csv))
+            trades_path = str(
+                getattr(self.trade_logger, "csv_path", self.trade_log_csv)
+            )
         if not trades_path:
             trades_path = self.trade_log_csv
         return best_path, trades_path
@@ -521,7 +534,8 @@ class TradingBot:
             )
             return
 
-        symbol = self.overrides.get("symbol") or getattr(self.config.perps, "symbol", None)
+        config = self._require_config()
+        symbol = self.overrides.get("symbol") or getattr(config.perps, "symbol", None)
         if not symbol:
             logger.warning("Health gating skipped: no symbol configured.")
             return
@@ -549,7 +563,9 @@ class TradingBot:
 
         result = results.get(symbol.upper())
         if not result:
-            logger.warning("Health check produced no result for %s; skipping gating.", symbol)
+            logger.warning(
+                "Health check produced no result for %s; skipping gating.", symbol
+            )
             return
 
         min_status = settings.get("min_status", "WARNING")
@@ -557,7 +573,9 @@ class TradingBot:
 
         if self._health_status_allows(result["status"], min_status):
             logger.info(
-                "Health check OK for %s (status=%s)", symbol, result.get("status", "UNKNOWN")
+                "Health check OK for %s (status=%s)",
+                symbol,
+                result.get("status", "UNKNOWN"),
             )
             return
 
@@ -577,6 +595,7 @@ class TradingBot:
         if not self.best_configs_path:
             return
 
+        config = self._require_config()
         mapping, meta = load_best_configs(self.best_configs_path)
         self._best_configs = mapping
         self._best_configs_meta = meta
@@ -588,7 +607,7 @@ class TradingBot:
             meta.get("generated_at"),
         )
 
-        requested_symbol = self.overrides.get("symbol") or self.config.perps.symbol
+        requested_symbol = self.overrides.get("symbol") or config.perps.symbol
         entry = mapping.get(requested_symbol)
 
         if not entry:
@@ -615,7 +634,7 @@ class TradingBot:
             self.active_config_id = str(entry.get("config_id"))
 
         params = entry.get("params") or {}
-        self.config.perps = _merge_perps_params(self.config.perps, params)
+        config.perps = _merge_perps_params(config.perps, params)
 
     def _validate_mode(self):
         if self.mode == "paper":
@@ -634,7 +653,9 @@ class TradingBot:
             if self.config.perps.useTestnet:
                 logger.error("Mode is 'live' but config has useTestnet=true")
                 logger.error("This would place orders on testnet, not mainnet")
-                raise ValueError("Configuration mismatch: live mode requires useTestnet=false")
+                raise ValueError(
+                    "Configuration mismatch: live mode requires useTestnet=false"
+                )
             logger.warning("=" * 60)
             logger.warning("⚠️  RUNNING IN LIVE MODE - REAL MONEY AT RISK  ⚠️")
             logger.warning("=" * 60)
@@ -642,7 +663,7 @@ class TradingBot:
             logger.warning("  - Real funds will be used")
             logger.warning("  - Real profit/loss will occur")
             logger.warning("=" * 60)
-            
+
             response = input("Type 'I UNDERSTAND THE RISKS' to continue: ")
             if response != "I UNDERSTAND THE RISKS":
                 logger.error("Live trading cancelled by user")
@@ -662,7 +683,9 @@ class TradingBot:
         logger.info(f"Risk per trade: {self.config.perps.riskPct * 100:.2f}%")
         logger.info(f"Stop-loss: {self.config.perps.stopLossPct * 100:.2f}%")
         logger.info(f"Take-profit: {self.config.perps.takeProfitPct * 100:.2f}%")
-        logger.info(f"Circuit breaker: {self.config.perps.consecutiveLossLimit or 'disabled'}")
+        logger.info(
+            f"Circuit breaker: {self.config.perps.consecutiveLossLimit or 'disabled'}"
+        )
 
     async def run(self):
         self.running = True
@@ -1043,7 +1066,8 @@ async def main():
     health_min_status = args.health_min_status or "WARNING"
     health_settings = {
         "enabled": health_enabled,
-        "best_configs_path": args.health_check_best_configs_json or args.best_configs_json,
+        "best_configs_path": args.health_check_best_configs_json
+        or args.best_configs_json,
         "trades_csv": args.health_check_trades_csv or args.trade_log_csv,
         "window_trades": args.health_window_trades,
         "min_trades": args.health_min_trades,
@@ -1053,7 +1077,9 @@ async def main():
     }
 
     default_health_store_dir = (
-        Path(args.daily_pnl_store_json).parent if args.daily_pnl_store_json else Path("state")
+        Path(args.daily_pnl_store_json).parent
+        if args.daily_pnl_store_json
+        else Path("state")
     )
     runtime_health_store = args.runtime_health_store_json or str(
         default_health_store_dir / "symbol_health.json"
@@ -1067,7 +1093,8 @@ async def main():
         "cooldown_minutes": args.runtime_health_cooldown_minutes,
         "warning_size_multiplier": args.runtime_health_warning_size_multiplier,
         "cooldown_backoff_multiplier": args.runtime_health_cooldown_backoff_multiplier,
-        "best_configs_path": args.health_check_best_configs_json or args.best_configs_json,
+        "best_configs_path": args.health_check_best_configs_json
+        or args.best_configs_json,
         "trades_csv": args.trade_log_csv,
         "store_path": runtime_health_store,
         "skip_if_unchanged_trades": args.runtime_health_skip_unchanged_trades,
@@ -1082,7 +1109,9 @@ async def main():
         risk_limits=risk_limits,
         trade_log_csv=args.trade_log_csv,
         health_settings=health_settings,
-        daily_pnl_store_path=args.daily_pnl_store_json if args.max_daily_loss_usd else None,
+        daily_pnl_store_path=args.daily_pnl_store_json
+        if args.max_daily_loss_usd
+        else None,
         runtime_health_settings=runtime_health_settings,
     )
 

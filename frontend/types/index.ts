@@ -48,7 +48,7 @@ export interface AccountSummary {
     equity: number;
     balance: number;
     unrealized_pnl: number;
-    margin_used: number;
+    used_margin: number;
     free_margin: number;
     leverage: number;
 }
@@ -70,10 +70,10 @@ export interface MarketDataState {
 export interface StrategyConfig {
     name: string;
     description?: string;
-    regime: Record<string, any>;
-    setup: Record<string, any>;
-    signals: Record<string, any>[];
-    risk: Record<string, any>;
+    regime: Record<string, unknown>;
+    setup: Record<string, unknown>;
+    signals: Record<string, unknown>[];
+    risk: Record<string, unknown>;
     confidence_threshold: number;
 }
 

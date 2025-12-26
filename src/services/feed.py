@@ -10,15 +10,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Optional, List
+from typing import Optional
 
 from fastapi import FastAPI
 
 from ..config import TradingBotConfig, load_config
-from ..metrics import SPREAD_ATR_PCT
+from ..exchanges.ccxt_client import CCXTClient
 from ..messaging import MessagingClient
 from .base import BaseService, create_app
-from ..exchanges.ccxt_client import CCXTClient
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,7 @@ class FeedService(BaseService):
 
         self.messaging = MessagingClient({"servers": self.config.messaging.servers})
         await self.messaging.connect()
-        
+
         # Initialize CCXT client
         # For feed, we might want to use a public client (no keys) if possible,
         # but using the configured credentials ensures higher rate limits.
@@ -66,11 +65,16 @@ class FeedService(BaseService):
             self.messaging = None
 
     async def _run(self) -> None:
-        assert self.config and self.messaging and self.exchange_client
+        if (
+            self.config is None
+            or self.messaging is None
+            or self.exchange_client is None
+        ):
+            raise RuntimeError("FeedService started before initialisation")
 
         symbols = self.config.trading.symbols
         subject = self.config.messaging.subjects["market_data"]
-        
+
         logger.info(f"Starting feed for symbols: {symbols}")
 
         while True:
@@ -78,51 +82,57 @@ class FeedService(BaseService):
                 # Fetch data for all symbols concurrently
                 tasks = [self._fetch_and_publish(symbol, subject) for symbol in symbols]
                 await asyncio.gather(*tasks, return_exceptions=True)
-                
+
                 # Rate limit compliance (simple sleep for now)
                 await asyncio.sleep(1.0)
-                
+
             except Exception as e:
                 logger.error(f"Error in feed loop: {e}")
                 await asyncio.sleep(5.0)
 
     async def _fetch_and_publish(self, symbol: str, subject: str) -> None:
         try:
-            ticker = await self.exchange_client.get_ticker(symbol)
+            exchange_client = self.exchange_client
+            messaging = self.messaging
+            if exchange_client is None or messaging is None:
+                raise RuntimeError("FeedService started before initialisation")
+
+            ticker = await exchange_client.get_ticker(symbol)
             if not ticker:
                 return
 
             # Construct snapshot compatible with existing consumers
             # Ticker structure from CCXT:
-            # {'symbol': 'BTC/USDT', 'timestamp': 123, 'datetime': '...', 'high': ..., 'low': ..., 
+            # {'symbol': 'BTC/USDT', 'timestamp': 123, 'datetime': '...', 'high': ..., 'low': ...,
             #  'bid': ..., 'bidVolume': ..., 'ask': ..., 'askVolume': ..., ...}
-            
-            best_bid = ticker.get('bid')
-            best_ask = ticker.get('ask')
-            last_price = ticker.get('last')
-            
+
+            best_bid = ticker.get("bid")
+            best_ask = ticker.get("ask")
+            last_price = ticker.get("last")
+
             if best_bid is None or best_ask is None or last_price is None:
                 return
 
             # Estimate spread
             spread = best_ask - best_bid
-            
+
             snapshot = {
                 "symbol": symbol,
                 "best_bid": best_bid,
                 "best_ask": best_ask,
-                "bid_size": ticker.get('bidVolume', 0.0),
-                "ask_size": ticker.get('askVolume', 0.0),
+                "bid_size": ticker.get("bidVolume", 0.0),
+                "ask_size": ticker.get("askVolume", 0.0),
+                "spread": spread,
                 "last_price": last_price,
-                "last_side": "buy", # inferred or unavailable in simple ticker
-                "last_size": 0.0,   # unavailable in simple ticker
-                "funding_rate": 0.0, # would need separate call
+                "last_side": "buy",  # inferred or unavailable in simple ticker
+                "last_size": 0.0,  # unavailable in simple ticker
+                "funding_rate": 0.0,  # would need separate call
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "order_flow_imbalance": 0.0, # requires L2 book
+                "order_flow_imbalance": 0.0,  # requires L2 book
             }
-            
-            await self.messaging.publish(subject, snapshot)
-            
+
+            await messaging.publish(subject, snapshot)
+
         except Exception as e:
             logger.warning(f"Failed to fetch/publish for {symbol}: {e}")
 

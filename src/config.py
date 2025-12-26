@@ -28,21 +28,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 APP_MODE = Literal["live", "paper", "replay", "backtest"]
 PRICE_SOURCE = Literal["live", "bars", "replay"]
-_SCRIPT_ONLY_ENV_KEYS = (
-    "NATS_URL",
-    "DB_URL",
-    "API_PORT",
-    "UI_PORT",
-    "OPS_API_URL",
-    "REPLAY_URL",
-    "EXEC_PORT",
-    "FEED_PORT",
-    "RISK_PORT",
-    "REPORTER_PORT",
-    "REPLAY_PORT",
-    "OPS_PORT",
-    "LOG_LEVEL",
-)
+APP_MODE = Literal["live", "paper", "replay", "backtest"]
+PRICE_SOURCE = Literal["live", "bars", "replay"]
 
 
 def _resolve_required_path(
@@ -150,19 +137,18 @@ class PerpsConfig(StrictModel):
     sessionMaxRuntimeMinutes: Optional[int] = Field(default=None, ge=1)
 
     @model_validator(mode="after")
-    def _validate_mode(cls, values: "PerpsConfig") -> "PerpsConfig":
-        mode = values.mode
-        idx = values.positionIdx
+    def _validate_mode(self) -> "PerpsConfig":
+        mode = self.mode
+        idx = self.positionIdx
         if mode == "oneway" and idx != 0:
             raise ValueError("positionIdx must be 0 in oneway mode")
         if mode == "hedge" and idx not in (1, 2):
             raise ValueError("positionIdx must be 1 or 2 in hedge mode")
-        if values.tp2Multiple < values.tp1Multiple:
+        if self.tp2Multiple < self.tp1Multiple:
             raise ValueError("tp2Multiple must be >= tp1Multiple")
-        if values.rsiMin >= values.rsiMax:
+        if self.rsiMin >= self.rsiMax:
             raise ValueError("rsiMin must be less than rsiMax")
-        return values
-
+        return self
 
 
 class TradingConfig(StrictModel):
@@ -178,7 +164,6 @@ class TradingConfig(StrictModel):
         if not value:
             raise ValueError("At least one trading symbol must be configured.")
         return value
-
 
 
 class RegimeConfig(StrictModel):
@@ -208,13 +193,15 @@ class SetupConfig(StrictModel):
         }
     )
 
+
 class VWAPConfig(StrictModel):
     enabled: bool = False
     mode: Literal["session", "rolling"] = "session"
     rolling_window: int = Field(default=20, ge=1)
     require_price_above_vwap_for_longs: bool = True
     require_price_below_vwap_for_shorts: bool = True
-    
+
+
 class OrderBookConfig(StrictModel):
     enabled: bool = False
     depth: int = Field(default=5, ge=1)
@@ -223,6 +210,7 @@ class OrderBookConfig(StrictModel):
     use_for_entry: bool = True
     use_for_exit: bool = False
 
+
 class OrderBookRiskConfig(StrictModel):
     enabled: bool = False
     widen_sl_on_adverse_imbalance: bool = False
@@ -230,6 +218,7 @@ class OrderBookRiskConfig(StrictModel):
     reduce_size_on_high_spread: bool = False
     spread_threshold_bps: float = Field(default=5.0, ge=0)
     size_reduction_factor: float = Field(default=0.5, ge=0, le=1)
+
 
 class ConfidenceConfig(StrictModel):
     min_threshold: float = Field(default=70.0, ge=0, le=100)
@@ -240,6 +229,7 @@ class ConfidenceConfig(StrictModel):
     signal_weight: float = Field(default=0.4, ge=0, le=1)
     penalties: Dict[str, int] = Field(default_factory=dict)
 
+
 class SignalsConfig(StrictModel):
     pullback_enabled: bool = True
     breakout_enabled: bool = True
@@ -247,10 +237,13 @@ class SignalsConfig(StrictModel):
     # Fields from yaml
     divergence_lookback: int = Field(default=3, ge=1)
     donchian_period: int = Field(default=20, ge=1)
+    bollinger_period: int = Field(default=20, ge=1)
+    bollinger_std_dev: float = Field(default=2.0, ge=0)
     rsi_overbought: int = Field(default=60, ge=0, le=100)
     rsi_oversold: int = Field(default=40, ge=0, le=100)
     rsi_period: int = Field(default=14, ge=1)
     weight: float = Field(default=0.35, ge=0, le=1)
+
 
 class StrategyConfig(StrictModel):
     regime: RegimeConfig = Field(default_factory=RegimeConfig)
@@ -261,6 +254,54 @@ class StrategyConfig(StrictModel):
     orderbook: OrderBookConfig = Field(default_factory=OrderBookConfig)
     orderbook_risk: OrderBookRiskConfig = Field(default_factory=OrderBookRiskConfig)
     active_strategies: List[str] = Field(default_factory=list)
+
+    @classmethod
+    def from_db_row(cls, row: Any) -> Optional["StrategyConfig"]:
+        """
+        Parses a database strategy row (SQLAlchemy model) into a StrategyConfig object.
+        """
+        if not row:
+            return None
+
+        # Helper to safely parse JSON or return dict
+        def parse_json(field: Any) -> Dict[str, Any]:
+            if isinstance(field, str):
+                import json
+
+                try:
+                    return json.loads(field)
+                except json.JSONDecodeError:
+                    return {}
+            elif isinstance(field, dict):
+                return field
+            return {}
+
+        try:
+            # Extract JSON fields from the DB model
+            regime_dict = parse_json(row.regime_config)
+            setup_dict = parse_json(row.setup_config)
+            signals_dict = parse_json(row.signals_config)
+            confidence_dict = parse_json(row.confidence_config)
+            vwap_dict = parse_json(row.vwap_config)
+            ob_dict = parse_json(row.orderbook_config)
+            ob_risk_dict = parse_json(row.orderbook_risk_config)
+
+            # Construct config object using Pydantic validation
+            # Any missing fields will fallback to defaults defined in sub-models
+            return cls(
+                regime=RegimeConfig(**regime_dict),
+                setup=SetupConfig(**setup_dict),
+                signals=SignalsConfig(**signals_dict),
+                confidence=ConfidenceConfig(**confidence_dict),
+                vwap=VWAPConfig(**vwap_dict),
+                orderbook=OrderBookConfig(**ob_dict),
+                orderbook_risk=OrderBookRiskConfig(**ob_risk_dict),
+                # If DB has a name field or similar, we might want to track it, but StrategyConfig
+                # strictly defines parameters. Strategy ID/Name is usually meta-data.
+            )
+        except Exception:
+            # logging.error(f"Failed to parse strategy config from DB row: {e}")
+            return None
 
 
 class LadderConfig(StrictModel):
@@ -322,13 +363,12 @@ class LoggingConfig(StrictModel):
 
 
 class DatabaseConfig(StrictModel):
-    path: Path = Field(default=Path("data/trading.db"))
+    url: str = Field(
+        default="sqlite:///data/trades.db"
+    )
+    min_pool_size: int = Field(default=5, ge=1)
+    max_pool_size: int = Field(default=20, ge=1)
     backup_interval: int = Field(default=3600, ge=0)
-
-    @field_validator("path", mode="before")
-    @classmethod
-    def _coerce_path(cls, value: Any) -> Path:
-        return Path(value).expanduser()
 
 
 class BacktestingConfig(StrictModel):
@@ -487,7 +527,6 @@ class TradingBotConfig(BaseSettings):
     shadow_paper: bool = False
     config_paths: ConfigPaths
 
-
     # Local overrides used by the Windows deploy script (extra fields expected in .env).
     nats_url: Optional[str] = None
     db_url: Optional[str] = None
@@ -551,20 +590,16 @@ def load_config(config_path: Optional[str] = None) -> TradingBotConfig:
     if app_mode_override:
         config_data["app_mode"] = app_mode_override
 
-    script_env_values: Dict[str, Optional[str]] = {}
-    for key in _SCRIPT_ONLY_ENV_KEYS:
-        if key in os.environ:
-            script_env_values[key] = os.environ.pop(key)
+    # Remove legacy manual environment manipulation.
+    # Pydantic BaseSettings handles environment variables automatically.
+    # We still check APP_MODE manually to force override on the dictionary if needed,
+    # or we could rely on APP_MODE env var if config_data doesn't have it.
+    
+    app_mode_override = os.getenv("APP_MODE")
+    if app_mode_override:
+        config_data["app_mode"] = app_mode_override
 
-    try:
-        return TradingBotConfig(**config_data)
-    finally:
-        for key, value in script_env_values.items():
-            if value is None:
-                continue
-            os.environ[key] = value
-
-
+    return TradingBotConfig(**config_data)
 
 
 def get_config() -> TradingBotConfig:

@@ -202,21 +202,37 @@ async def fetch_all_monthly(
                 }
             )
         except Exception as exc:
-            logging.warning("Failed to summarise final coverage for %s: %s", symbol, exc)
+            logging.warning(
+                "Failed to summarise final coverage for %s: %s", symbol, exc
+            )
 
     return outputs, coverage
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch OHLCV history for multiple symbols.")
-    parser.add_argument("--symbols", help="Comma-separated symbols, default SOLUSDT,BTCUSDT,ETHUSDT.")
+    parser = argparse.ArgumentParser(
+        description="Fetch OHLCV history for multiple symbols."
+    )
+    parser.add_argument(
+        "--symbols", help="Comma-separated symbols, default SOLUSDT,BTCUSDT,ETHUSDT."
+    )
     parser.add_argument("--start", default=DEFAULT_START, help="Start date YYYY-MM-DD")
     parser.add_argument("--end", default=DEFAULT_END, help="End date YYYY-MM-DD")
-    parser.add_argument("--interval", default=DEFAULT_INTERVAL, help="Interval in minutes (e.g. 5)")
+    parser.add_argument(
+        "--interval", default=DEFAULT_INTERVAL, help="Interval in minutes (e.g. 5)"
+    )
     parser.add_argument("--base-url", help="Override Zoomex base URL (optional).")
-    parser.add_argument("--testnet", action="store_true", help="Use Zoomex testnet base URL when not overriding.")
-    parser.add_argument("--limit", type=int, default=1000, help="Page size for kline requests.")
-    parser.add_argument("--sleep", type=float, default=0.25, help="Sleep between requests (seconds).")
+    parser.add_argument(
+        "--testnet",
+        action="store_true",
+        help="Use Zoomex testnet base URL when not overriding.",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=1000, help="Page size for kline requests."
+    )
+    parser.add_argument(
+        "--sleep", type=float, default=0.25, help="Sleep between requests (seconds)."
+    )
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -256,7 +272,9 @@ def main() -> None:
         )
     )
     if outputs:
-        logging.info("Fetched %d files: %s", len(outputs), ", ".join(str(p) for p in outputs))
+        logging.info(
+            "Fetched %d files: %s", len(outputs), ", ".join(str(p) for p in outputs)
+        )
     else:
         logging.warning("No files fetched; see logs for details.")
     if coverage:

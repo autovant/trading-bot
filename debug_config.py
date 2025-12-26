@@ -1,5 +1,6 @@
-from src.config import load_config
 import os
+
+from src.config import load_config
 
 # Ensure env vars are unset
 if "EXCHANGE_API_KEY" in os.environ:
@@ -8,16 +9,15 @@ if "EXCHANGE_API_KEY" in os.environ:
 try:
     config = load_config()
     print(f"API Key: '{config.exchange.api_key}'")
-    
+
     # Force live mode to test validation
     config.app_mode = "live"
     # This should trigger validation if we re-validate, but pydantic validation runs on init.
     # So let's try to create a new config with live mode
-    
-    from src.config import TradingBotConfig
+
     # We need to reconstruct the dict to pass to TradingBotConfig
     # But load_config does that.
-    
+
     # Let's just see if we can instantiate TradingBotConfig with live mode and the current api_key
     print("Attempting to validate live mode with current keys...")
     try:

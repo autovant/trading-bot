@@ -1,14 +1,12 @@
 import csv
 import json
 import os
-import sys
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
-
-from src.logging.trade_logger import TradeLogger
+from src.app_logging.trade_logger import TradeLogger
 from tools.health_check_configs import (
     Thresholds,
     assess_symbol,
@@ -49,7 +47,9 @@ def test_evaluate_symbol_health_warning_and_fail():
     assert "drawdown_exceeds_limit" in reasons_fail
 
 
-def _write_best_configs(tmp_path: Path, *, symbol: str = "BTCUSDT", config_id: str = "cfg-best") -> Path:
+def _write_best_configs(
+    tmp_path: Path, *, symbol: str = "BTCUSDT", config_id: str = "cfg-best"
+) -> Path:
     payload = {
         "schema_version": "1.0",
         "metric": "pnl_pct",
@@ -73,7 +73,9 @@ def _write_best_configs(tmp_path: Path, *, symbol: str = "BTCUSDT", config_id: s
     return path
 
 
-def _write_trade_csv(tmp_path: Path, *, symbol: str = "BTCUSDT", config_id: str = "cfg-best") -> Path:
+def _write_trade_csv(
+    tmp_path: Path, *, symbol: str = "BTCUSDT", config_id: str = "cfg-best"
+) -> Path:
     csv_path = tmp_path / "trades.csv"
     base_time = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
     values = [-0.05, 0.02, -0.07, -0.08, -0.1, 0.1, -0.15, -0.05, -0.05, -0.02]
@@ -84,8 +86,12 @@ def _write_trade_csv(tmp_path: Path, *, symbol: str = "BTCUSDT", config_id: str 
         for idx, value in enumerate(values):
             writer.writerow(
                 {
-                    "timestamp_open": (base_time + timedelta(minutes=idx * 5)).isoformat(),
-                    "timestamp_close": (base_time + timedelta(minutes=idx * 5 + 3)).isoformat(),
+                    "timestamp_open": (
+                        base_time + timedelta(minutes=idx * 5)
+                    ).isoformat(),
+                    "timestamp_close": (
+                        base_time + timedelta(minutes=idx * 5 + 3)
+                    ).isoformat(),
                     "symbol": symbol,
                     "side": "LONG",
                     "size": "1",

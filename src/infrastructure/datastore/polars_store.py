@@ -1,9 +1,11 @@
-import polars as pl
+import logging
 from pathlib import Path
 from typing import Optional
-import logging
+
+import polars as pl
 
 logger = logging.getLogger(__name__)
+
 
 class PolarsDataStore:
     def __init__(self, data_dir: str = "data"):

@@ -1,12 +1,14 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from src.config import PerpsConfig
 from src.strategies.perps_trend_atr_multi_tf import compute_signals_multi_tf
 from src.ta_indicators.ta_core import ema
 
 
-def _build_trending_df(periods: int, freq: str, start: float, slope: float) -> pd.DataFrame:
+def _build_trending_df(
+    periods: int, freq: str, start: float, slope: float
+) -> pd.DataFrame:
     idx = pd.date_range("2024-01-01", periods=periods, freq=freq, tz="UTC")
     base = start + np.arange(periods) * slope
     df = pd.DataFrame(

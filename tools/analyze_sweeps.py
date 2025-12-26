@@ -12,10 +12,10 @@ import csv
 import json
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean, median
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,9 @@ def load_summary_file(path: Path) -> Optional[Dict[str, Any]]:
 
     schema_version = str(payload.get("schema_version", ""))
     if not schema_version.startswith("1."):
-        logger.warning("Skipping %s due to incompatible schema_version=%s", path, schema_version)
+        logger.warning(
+            "Skipping %s due to incompatible schema_version=%s", path, schema_version
+        )
         return None
     return payload
 
@@ -119,7 +121,9 @@ def aggregate_configs(
     return aggregates
 
 
-def find_summary_files(summaries: Optional[List[str]], summaries_dir: str) -> List[Path]:
+def find_summary_files(
+    summaries: Optional[List[str]], summaries_dir: str
+) -> List[Path]:
     if summaries:
         return [Path(p) for p in summaries]
     base = Path(summaries_dir)
@@ -128,7 +132,9 @@ def find_summary_files(summaries: Optional[List[str]], summaries_dir: str) -> Li
     return sorted(base.rglob("sweep_summary*.json"))
 
 
-def render_report(aggregates: Dict[Tuple[str, str], Dict[str, Any]], metric: str, top_n: int) -> str:
+def render_report(
+    aggregates: Dict[Tuple[str, str], Dict[str, Any]], metric: str, top_n: int
+) -> str:
     by_symbol: Dict[str, List[Dict[str, Any]]] = {}
     for agg in aggregates.values():
         by_symbol.setdefault(agg["symbol"], []).append(agg)
@@ -148,7 +154,9 @@ def render_report(aggregates: Dict[Tuple[str, str], Dict[str, Any]], metric: str
     return "\n".join(lines)
 
 
-def select_best_configs(aggregates: Dict[Tuple[str, str], Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def select_best_configs(
+    aggregates: Dict[Tuple[str, str], Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
     by_symbol: Dict[str, List[Dict[str, Any]]] = {}
     for agg in aggregates.values():
         by_symbol.setdefault(agg["symbol"], []).append(agg)
@@ -189,7 +197,9 @@ def write_best_json(best: Dict[str, Dict[str, Any]], metric: str, path: Path) ->
     logger.info("Wrote best-config JSON to %s", path)
 
 
-def write_csv(aggregates: Dict[Tuple[str, str], Dict[str, Any]], metric: str, csv_path: Path) -> None:
+def write_csv(
+    aggregates: Dict[Tuple[str, str], Dict[str, Any]], metric: str, csv_path: Path
+) -> None:
     fieldnames = [
         "symbol",
         "config_id",
@@ -228,21 +238,47 @@ def write_csv(aggregates: Dict[Tuple[str, str], Dict[str, Any]], metric: str, cs
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Analyze sweep summary JSON files and rank configs.")
-    parser.add_argument("--summaries-dir", type=str, default="results/backtests", help="Directory to search for sweep summaries.")
-    parser.add_argument("--summaries", nargs="*", help="Explicit list of summary JSON files to include.")
+    parser = argparse.ArgumentParser(
+        description="Analyze sweep summary JSON files and rank configs."
+    )
+    parser.add_argument(
+        "--summaries-dir",
+        type=str,
+        default="results/backtests",
+        help="Directory to search for sweep summaries.",
+    )
+    parser.add_argument(
+        "--summaries", nargs="*", help="Explicit list of summary JSON files to include."
+    )
     parser.add_argument("--symbol", type=str, help="Restrict analysis to this symbol.")
-    parser.add_argument("--metric", type=str, default="pnl", help="Metric key inside metrics to rank by.")
-    parser.add_argument("--top-n", type=int, default=10, help="How many configs to show per symbol.")
+    parser.add_argument(
+        "--metric",
+        type=str,
+        default="pnl",
+        help="Metric key inside metrics to rank by.",
+    )
+    parser.add_argument(
+        "--top-n", type=int, default=10, help="How many configs to show per symbol."
+    )
     parser.add_argument("--csv-out", type=str, help="Optional CSV output path.")
-    parser.add_argument("--best-json", type=str, help="Optional best-config JSON output path.")
-    parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument(
+        "--best-json", type=str, help="Optional best-config JSON output path."
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
-    logging.basicConfig(level=getattr(logging, args.log_level), format="%(asctime)s [%(levelname)s] %(message)s")
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
 
     files = find_summary_files(args.summaries, args.summaries_dir)
     if not files:
@@ -258,9 +294,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("All summary files were skipped; nothing to analyze.")
         return 1
 
-    entries = collect_config_entries(summaries, metric=args.metric, symbol_filter=args.symbol)
+    entries = collect_config_entries(
+        summaries, metric=args.metric, symbol_filter=args.symbol
+    )
     if not entries:
-        logger.error("No configs found matching the metric '%s'%s.", args.metric, f" for symbol {args.symbol}" if args.symbol else "")
+        logger.error(
+            "No configs found matching the metric '%s'%s.",
+            args.metric,
+            f" for symbol {args.symbol}" if args.symbol else "",
+        )
         return 1
 
     aggregates = aggregate_configs(entries, metric=args.metric)
@@ -278,7 +320,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
         write_best_json(best, metric=args.metric, path=Path(args.best_json))
 
-    logger.info("Processed %d summaries, aggregated %d configs.", len(summaries), len(aggregates))
+    logger.info(
+        "Processed %d summaries, aggregated %d configs.",
+        len(summaries),
+        len(aggregates),
+    )
     return 0
 
 

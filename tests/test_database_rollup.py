@@ -11,7 +11,9 @@ async def test_aggregate_daily_pnl_rollup(tmp_path):
     database = DatabaseManager(db_path)
     await database.initialize()
 
-    base_timestamp = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+    base_timestamp = datetime.now(timezone.utc).replace(
+        hour=12, minute=0, second=0, microsecond=0
+    )
     entry_one = PnLEntry(
         symbol="BTCUSDT",
         trade_id="trade-1",

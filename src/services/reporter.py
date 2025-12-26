@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI
@@ -71,13 +71,14 @@ class ReporterService(BaseService):
             self._latest_metrics = None
 
     async def _publish_summary_loop(self) -> None:
-        assert self.config and self.messaging
+        if self.config is None or self.messaging is None:
+            raise RuntimeError("ReporterService started before initialisation")
         subject = self.config.messaging.subjects.get("reports", "reports.performance")
 
         while True:
             if self._latest_metrics:
                 summary = dict(self._latest_metrics)
-                summary.setdefault("timestamp", datetime.utcnow().isoformat())
+                summary.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
                 await self.messaging.publish(subject, summary)
             await asyncio.sleep(60.0)
 

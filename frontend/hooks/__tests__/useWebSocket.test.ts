@@ -5,8 +5,8 @@ import { useWebSocket } from '../useWebSocket';
 class MockWebSocket {
     onopen: (() => void) | null = null;
     onclose: (() => void) | null = null;
-    onmessage: ((event: any) => void) | null = null;
-    onerror: ((event: any) => void) | null = null;
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
     readyState = WebSocket.CONNECTING;
     url: string;
 
@@ -23,12 +23,12 @@ class MockWebSocket {
         this.onclose?.();
     }
 
-    send(data: any) {
-        // mock send
+    send(data: string) {
+        void data;
     }
 }
 
-global.WebSocket = MockWebSocket as any;
+global.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 
 describe('useWebSocket', () => {
     beforeEach(() => {
@@ -53,9 +53,11 @@ describe('useWebSocket', () => {
 
     it('should handle messages with validator', async () => {
         const onMessage = jest.fn();
-        const validator = (data: any): data is { id: number } => typeof data.id === 'number';
+        const validator = (data: unknown): data is { id: number } => {
+            return typeof data === 'object' && data !== null && 'id' in data && typeof (data as { id: unknown }).id === 'number';
+        };
 
-        const { result } = renderHook(() => useWebSocket('ws://test.com', {
+        renderHook(() => useWebSocket('ws://test.com', {
             onMessage,
             validator
         }));

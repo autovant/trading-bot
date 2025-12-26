@@ -13,7 +13,6 @@ from src.exchanges.zoomex_v3 import ZoomexV3Client
 from src.services.perps import PerpsService
 from src.state.perps_state_store import PerpsState, save_perps_state
 
-
 LOGGER_ENV = "SAFETY_SCENARIO_LOG"
 
 
@@ -111,7 +110,7 @@ async def test_safety_margin_block(scenario_log_handler):
     mock_client.get_margin_info = AsyncMock(
         return_value={"marginRatio": 0.50, "found": True}
     )
-    service.client = mock_client
+    service.exchange = mock_client
     await service._enter_long(price=100.0)
 
 
@@ -154,7 +153,7 @@ async def test_safety_reconciliation_guard(scenario_log_handler):
             ]
         }
     )
-    service.client = mock_client
+    service.exchange = mock_client
     await service._reconcile_positions()
     assert service.reconciliation_block_active
 
@@ -177,7 +176,7 @@ async def test_safety_reconciliation_adopt_long(scenario_log_handler):
             ]
         }
     )
-    service.client = mock_client
+    service.exchange = mock_client
     await service._reconcile_positions()
     assert service.current_position_qty == 2
     assert not service.reconciliation_block_active

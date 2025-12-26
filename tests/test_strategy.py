@@ -2,21 +2,22 @@
 Unit tests for trading strategy components.
 """
 
-import pytest
-import pandas as pd
-import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 
-from src.strategy import (
-    TradingStrategy,
-    MarketRegime,
-    TradingSetup,
-    TradingSignal,
-    ConfidenceScore,
-)
+import numpy as np
+import pandas as pd
+import pytest
+
 from src.config import get_config
 from src.indicators import TechnicalIndicators
-from src.exchange import OrderResponse
+from src.models import (
+    ConfidenceScore,
+    MarketRegime,
+    OrderResponse,
+    TradingSetup,
+    TradingSignal,
+)
+from src.strategy import TradingStrategy
 
 
 class MockExchange:
@@ -69,7 +70,10 @@ class MockExchange:
         client_id=None,
         is_shadow=False,
     ):
-        order_id = client_id or f"mock-{symbol}-{datetime.utcnow().strftime('%H%M%S')}"
+        order_id = (
+            client_id
+            or f"mock-{symbol}-{datetime.now(timezone.utc).strftime('%H%M%S')}"
+        )
         return OrderResponse(
             order_id=order_id,
             client_id=order_id,
@@ -80,7 +84,7 @@ class MockExchange:
             price=price,
             status="pending",
             mode="paper",
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
 
     async def get_positions(self, symbols=None):
@@ -91,6 +95,27 @@ class MockExchange:
 
     async def get_account_balance(self):
         return {"totalWalletBalance": 1000.0}
+
+    async def get_balance(self):
+        return {"totalWalletBalance": 1000.0}
+
+    async def get_market_status(self):
+        return {"status": "ok"}
+
+    async def get_ticker(self, symbol):
+        return {"last": 50000.0}
+
+    async def get_order_book(self, symbol, limit=20):
+        return {"bids": [], "asks": []}
+
+    async def cancel_all_orders(self, symbol):
+        return []
+
+    async def initialize(self):
+        pass
+
+    async def close(self):
+        pass
 
 
 class MockDatabase:
@@ -154,7 +179,7 @@ def strategy(config, mock_exchange, mock_database):
 @pytest.fixture
 def sample_data():
     """Generate sample market data for testing."""
-    dates = pd.date_range(start="2023-01-01", periods=200, freq="1H")
+    dates = pd.date_range(start="2023-01-01", periods=200, freq="h")
     np.random.seed(42)
 
     # Generate trending price data
@@ -242,7 +267,9 @@ class TestRegimeDetection:
             1, 1.2, len(bullish_data)
         )
 
-        regime = strategy._detect_regime(bullish_data)
+        regime = strategy.signal_generator.detect_regime(
+            bullish_data, strategy.config.strategy
+        )
 
         assert isinstance(regime, MarketRegime)
         assert regime.regime in ["bullish", "neutral"]
@@ -257,7 +284,9 @@ class TestRegimeDetection:
             1, 0.8, len(bearish_data)
         )
 
-        regime = strategy._detect_regime(bearish_data)
+        regime = strategy.signal_generator.detect_regime(
+            bearish_data, strategy.config.strategy
+        )
 
         assert isinstance(regime, MarketRegime)
         assert regime.regime in ["bearish", "neutral"]
@@ -270,7 +299,9 @@ class TestSetupDetection:
 
     def test_bullish_setup_detection(self, strategy, sample_data):
         """Test bullish setup detection."""
-        setup = strategy._detect_setup(sample_data)
+        setup = strategy.signal_generator.detect_setup(
+            sample_data, strategy.config.strategy
+        )
 
         assert isinstance(setup, TradingSetup)
         assert setup.direction in ["long", "short", "none"]
@@ -289,7 +320,9 @@ class TestSetupDetection:
             }
         )
 
-        setup = strategy._detect_setup(short_data)
+        setup = strategy.signal_generator.detect_setup(
+            short_data, strategy.config.strategy
+        )
 
         assert isinstance(setup, TradingSetup)
         assert setup.direction == "none"
@@ -300,7 +333,9 @@ class TestSignalGeneration:
 
     def test_signal_generation(self, strategy, sample_data):
         """Test signal generation."""
-        signals = strategy._generate_signals(sample_data)
+        signals = strategy.signal_generator.generate_signals(
+            sample_data, strategy.config.strategy
+        )
 
         assert isinstance(signals, list)
 
@@ -333,7 +368,9 @@ class TestConfidenceScoring:
             take_profit=52000,
         )
 
-        confidence = strategy._calculate_confidence(regime, setup, signal, "BTCUSDT")
+        confidence = strategy.position_manager.calculate_confidence(
+            regime, setup, signal, strategy.config.strategy, symbol="BTCUSDT"
+        )
 
         assert isinstance(confidence, ConfidenceScore)
         assert 0 <= confidence.total_score <= 100
@@ -357,7 +394,9 @@ class TestConfidenceScoring:
             take_profit=52000,
         )
 
-        confidence = strategy._calculate_confidence(regime, setup, signal, "BTCUSDT")
+        confidence = strategy.position_manager.calculate_confidence(
+            regime, setup, signal, strategy.config.strategy, symbol="BTCUSDT"
+        )
 
         # Should have penalty for conflicting timeframes
         assert confidence.penalty_score < 0
@@ -386,14 +425,21 @@ class TestPositionSizing:
             total_score=75,
         )
 
-        position_size = strategy._calculate_position_size(signal, confidence)
+        position_size = strategy.position_manager.calculate_position_size(
+            signal,
+            confidence,
+            strategy.config.trading.initial_capital,  # account_balance
+            strategy.config.trading.initial_capital,  # initial_capital
+            strategy.config,  # bot config
+            strategy.crisis_mode,
+        )
 
         assert position_size > 0
         assert isinstance(position_size, float)
 
     def test_position_size_with_crisis_mode(self, strategy):
         """Test position sizing in crisis mode."""
-        strategy.crisis_mode = True
+        strategy.risk_manager.crisis_mode = True
 
         signal = TradingSignal(
             signal_type="breakout",
@@ -413,10 +459,24 @@ class TestPositionSizing:
             total_score=75,
         )
 
-        crisis_size = strategy._calculate_position_size(signal, confidence)
+        crisis_size = strategy.position_manager.calculate_position_size(
+            signal,
+            confidence,
+            strategy.config.trading.initial_capital,
+            strategy.config.trading.initial_capital,
+            strategy.config,
+            strategy.risk_manager.crisis_mode,
+        )
 
-        strategy.crisis_mode = False
-        normal_size = strategy._calculate_position_size(signal, confidence)
+        strategy.risk_manager.crisis_mode = False
+        normal_size = strategy.position_manager.calculate_position_size(
+            signal,
+            confidence,
+            strategy.config.trading.initial_capital,
+            strategy.config.trading.initial_capital,
+            strategy.config,
+            strategy.risk_manager.crisis_mode,
+        )
 
         assert crisis_size < normal_size
 
@@ -427,13 +487,30 @@ class TestRiskManagement:
     @pytest.mark.asyncio
     async def test_crisis_mode_activation(self, strategy):
         """Test crisis mode activation."""
-        strategy.consecutive_losses = 3
-        strategy.total_pnl = -100  # 10% drawdown on $1000
+        strategy.risk_manager.consecutive_losses = 3
+        strategy.total_pnl = (
+            -100
+        )  # Strategy still tracks total_pnl? Yes, updated in handle_exec
+        # But check_risk_management uses account_balance = initial + total_pnl
+        # And checks peak_equity inside RiskManager.
+        # RiskManager tracks its OWN peak_equity.
+        # So we need to ensure RiskManager knows about the pnl state or peak equity.
+        # check_risk_management passes current_equity (1000 - 100 = 900).
+        # RiskManager peak_equity starts at 0.
+        # If current_equity > peak_equity, it updates.
+        # So 900 > 0.
+        # DD = 0.
+        # So NO crisis mode if peak_equity isn't set high enough.
+
+        # We need to prime RiskManager peak_equity.
+        strategy.risk_manager.peak_equity = 1000.0
+
+        # strategy.total_pnl is used to calc account_balance passed to RM.
 
         await strategy.check_risk_management()
 
         # Crisis mode should be activated
-        assert strategy.crisis_mode
+        assert strategy.risk_manager.crisis_mode
 
     def test_signal_filtering(self, strategy):
         """Test signal filtering based on regime and setup."""
@@ -460,7 +537,7 @@ class TestRiskManagement:
             ),
         ]
 
-        filtered = strategy._filter_signals(signals, regime, setup)
+        filtered = strategy.signal_generator.filter_signals(signals, regime, setup)
 
         # Should only keep the long signal
         assert len(filtered) == 1

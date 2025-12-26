@@ -1,4 +1,5 @@
 import pytest
+
 from src.engine.perps_executor import risk_position_size
 
 
@@ -8,7 +9,7 @@ def test_risk_position_size_normal_case_cash_cap_binds():
     stop_loss_pct = 0.02
     price = 100.0
     cash_cap = 0.20
-    
+
     qty = risk_position_size(
         equity_usdt=equity,
         risk_pct=risk_pct,
@@ -16,13 +17,13 @@ def test_risk_position_size_normal_case_cash_cap_binds():
         price=price,
         cash_cap=cash_cap,
     )
-    
+
     risk_dollars = equity * risk_pct
     notional = risk_dollars / stop_loss_pct
     max_deploy = equity * cash_cap
     expected_notional = min(notional, max_deploy)
     expected_qty = expected_notional / price
-    
+
     assert qty == pytest.approx(expected_qty, rel=1e-6)
     assert qty == pytest.approx(20.0, rel=1e-6)
 
@@ -33,7 +34,7 @@ def test_risk_position_size_risk_limit_binds():
     stop_loss_pct = 0.02
     price = 100.0
     cash_cap = 0.50
-    
+
     qty = risk_position_size(
         equity_usdt=equity,
         risk_pct=risk_pct,
@@ -41,16 +42,15 @@ def test_risk_position_size_risk_limit_binds():
         price=price,
         cash_cap=cash_cap,
     )
-    
+
     risk_dollars = equity * risk_pct
     notional = risk_dollars / stop_loss_pct
     max_deploy = equity * cash_cap
     expected_notional = min(notional, max_deploy)
     expected_qty = expected_notional / price
-    
+
     assert qty == pytest.approx(expected_qty, rel=1e-6)
     assert qty == pytest.approx(25.0, rel=1e-6)
-
 
 
 def test_risk_position_size_zero_stop_loss():

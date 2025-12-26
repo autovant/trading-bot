@@ -13,38 +13,38 @@ const EmergencyConfirmModal: React.FC<EmergencyConfirmModalProps> = ({ isOpen, o
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 backdrop-blur-sm">
-            <div className="bg-card border border-red-500 rounded-lg w-[400px] shadow-2xl animate-in fade-in zoom-in duration-200">
-                <div className="flex items-center justify-between p-4 border-b border-red-500/30 bg-red-500/10">
-                    <h2 className="text-sm font-bold text-red-500 uppercase tracking-wider flex items-center gap-2">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 backdrop-blur-sm p-4">
+            <div className="w-full max-w-[460px] rounded-2xl border border-red-500/40 bg-card/90 shadow-[0_25px_80px_-40px_rgba(0,0,0,0.95)] animate-in fade-in zoom-in duration-200 overflow-hidden">
+                <div className="flex items-center justify-between px-5 py-4 border-b border-red-500/30 bg-gradient-to-r from-red-500/15 via-card/80 to-card/80">
+                    <h2 className="text-sm font-semibold text-red-400 uppercase tracking-[0.18em] flex items-center gap-2">
                         <AlertTriangle className="w-4 h-4" />
                         Emergency Action
                     </h2>
-                    <button onClick={onCancel} className="text-red-400 hover:text-red-300">
+                    <button onClick={onCancel} className="text-red-300 hover:text-white rounded-full p-2 hover:bg-white/5 transition-colors">
                         <X className="w-4 h-4" />
                     </button>
                 </div>
 
-                <div className="p-6">
-                    <p className="text-white font-medium text-center text-lg mb-2">
-                        Are you sure you want to cancel ALL open orders?
+                <div className="p-6 space-y-4">
+                    <p className="text-white font-semibold text-center text-lg">
+                        Cancel every open order now?
                     </p>
-                    <p className="text-gray-400 text-center text-xs mb-6">
-                        This action cannot be undone. All active orders will be immediately removed from the book.
+                    <p className="text-gray-400 text-center text-sm">
+                        This is irreversible. Orders are pulled from the book immediately and the bot will remain stopped until restarted.
                     </p>
 
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-2 gap-3 pt-2">
                         <button
                             onClick={onCancel}
-                            className="py-3 rounded bg-card-hover hover:bg-card-border text-gray-300 font-bold text-xs transition-colors"
+                            className="py-3 rounded-lg bg-card-hover hover:bg-card-border text-gray-200 font-bold text-xs uppercase tracking-wide border border-card-border/70 transition-colors"
                         >
-                            CANCEL
+                            Keep Running
                         </button>
                         <button
                             onClick={onConfirm}
-                            className="py-3 rounded bg-red-600 hover:bg-red-500 text-white font-bold text-xs transition-colors"
+                            className="py-3 rounded-lg bg-gradient-to-r from-red-500 to-red-600 text-white font-bold text-xs uppercase tracking-wide shadow-[0_12px_30px_-18px_rgba(239,68,68,0.8)] hover:brightness-110 transition-transform active:scale-95"
                         >
-                            CONFIRM CANCEL ALL
+                            Confirm Cancel All
                         </button>
                     </div>
                 </div>

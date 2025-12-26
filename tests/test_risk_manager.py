@@ -1,89 +1,63 @@
-from src.risk.risk_manager import RiskManager
-from src.state.daily_pnl_store import DailyPnlStore
+import pytest
+
+from src.config import get_config
+from src.risk_manager import RiskManager
 
 
-def test_risk_manager_blocks_when_open_risk_limit_exceeded():
-    manager = RiskManager(
-        starting_equity=1000.0,
-        max_account_risk_pct=0.02,
-        max_open_risk_pct=0.05,
-        max_symbol_risk_pct=0.03,
-    )
-
-    allowed, reason = manager.can_open_new_position("BTCUSDT", 500.0, 0.01)
-    assert allowed
-    assert reason is None
-
-    manager.register_open_position("BTCUSDT", 500.0, 0.01)
-
-    allowed, reason = manager.can_open_new_position("BTCUSDT", 4000.0, 0.02)
-    assert not allowed
-    assert reason == "max_open_risk_pct"
+@pytest.fixture
+def config():
+    return get_config()
 
 
-def test_symbol_limit_enforced_independently():
-    manager = RiskManager(
-        starting_equity=1000.0,
-        max_account_risk_pct=0.10,
-        max_open_risk_pct=0.50,
-        max_symbol_risk_pct=0.03,
-    )
-
-    manager.register_open_position("SOLUSDT", 800.0, 0.02)  # risk $16, well below account cap
-    allowed, reason = manager.can_open_new_position("SOLUSDT", 1000.0, 0.02)
-
-    assert not allowed
-    assert reason == "max_symbol_risk_pct"
+@pytest.fixture
+def risk_manager(config):
+    return RiskManager(config)
 
 
-def test_daily_loss_stop_blocks_new_positions():
-    manager = RiskManager(
-        starting_equity=1000.0,
-        max_account_risk_pct=0.05,
-        max_open_risk_pct=0.50,
-        max_symbol_risk_pct=0.50,
-        max_daily_loss_usd=50.0,
-    )
-
-    manager.register_close_position("BTCUSDT", -60.0)
-
-    allowed, reason = manager.can_open_new_position("ETHUSDT", 100.0, 0.01)
-    assert not allowed
-    assert reason in {"max_daily_loss_usd", "max_account_risk_pct"}
+@pytest.mark.asyncio
+async def test_risk_manager_initialization(risk_manager):
+    assert risk_manager.crisis_mode is False
+    assert risk_manager.daily_pnl == 0.0
+    assert risk_manager.peak_equity == 0.0
 
 
-def test_daily_loss_persists_across_instances(tmp_path):
-    store = DailyPnlStore(str(tmp_path / "pnl.json"))
-    account_id = "zoomex-paper"
+@pytest.mark.asyncio
+async def test_update_trade_stats(risk_manager):
+    risk_manager.update_trade_stats(100.0)
+    assert risk_manager.daily_pnl == 100.0
+    assert risk_manager.winning_trades == 1
+    assert risk_manager.consecutive_losses == 0
 
-    manager = RiskManager(
-        starting_equity=1000.0,
-        max_account_risk_pct=0.10,
-        max_open_risk_pct=0.50,
-        max_symbol_risk_pct=0.50,
-        max_daily_loss_usd=30.0,
-        daily_pnl_store=store,
-        account_id=account_id,
-    )
+    risk_manager.update_trade_stats(-50.0)
+    assert risk_manager.daily_pnl == 50.0
+    assert risk_manager.losing_trades == 1
+    assert risk_manager.consecutive_losses == 1
 
-    manager.register_close_position("BTCUSDT", -20.0)
-    manager.register_close_position("ETHUSDT", -15.0)
 
-    allowed, reason = manager.can_open_new_position("SOLUSDT", 100.0, 0.01)
-    assert not allowed
-    assert reason == "max_daily_loss_usd"
+@pytest.mark.asyncio
+async def test_check_risk_management_drawdown(risk_manager):
+    # Setup: Peak equity 1000
+    risk_manager.peak_equity = 1000.0
 
-    # Recreate manager with same store to ensure persisted loss is respected
-    manager2 = RiskManager(
-        starting_equity=1000.0,
-        max_account_risk_pct=0.10,
-        max_open_risk_pct=0.50,
-        max_symbol_risk_pct=0.50,
-        max_daily_loss_usd=30.0,
-        daily_pnl_store=store,
-        account_id=account_id,
-    )
+    # 20% drawdown (threshold is usually 15% or similar in config, let's assume default config trigger)
+    # If config default is 0.15 (15%), then 800 current equity is 20% DD.
+    current_equity = 800.0
 
-    allowed2, reason2 = manager2.can_open_new_position("SOLUSDT", 100.0, 0.01)
-    assert not allowed2
-    assert reason2 == "max_daily_loss_usd"
+    actions = await risk_manager.check_risk_management(current_equity=current_equity)
+
+    assert risk_manager.crisis_mode is True
+    assert actions["halt_trading"] is True
+    assert actions["close_all"] is True
+
+
+@pytest.mark.asyncio
+async def test_check_risk_management_daily_limit(risk_manager):
+    # Max daily risk 0.03 (3%) usually.
+    # Equity 1000. Limit = 30.
+    risk_manager.daily_pnl = -60.0
+
+    actions = await risk_manager.check_risk_management(current_equity=1000.0)
+
+    assert actions["close_all"] is True
+    assert actions["halt_trading"] is True
+

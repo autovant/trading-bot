@@ -8,5 +8,4 @@ class AlertSink(ABC):
     @abstractmethod
     async def send_alert(
         self, category: str, message: str, context: Optional[Dict[str, Any]] = None
-    ) -> None:
-        ...
+    ) -> None: ...

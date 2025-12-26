@@ -11,22 +11,22 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gzip
+import io
 import logging
-import sys
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
-import gzip
-import io
 
 import pandas as pd
 from aiohttp import ClientSession, ClientTimeout
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.exchanges.zoomex_v3 import ZoomexV3Client, ZoomexError  # noqa: E402
+from src.exchanges.zoomex_v3 import ZoomexError, ZoomexV3Client  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,9 @@ def _interval_ms(interval: str) -> int:
         minutes = int(interval)
         return minutes * 60 * 1000
     except ValueError:
-        raise ValueError(f"Interval must be numeric minutes for CSV output, got {interval}")
+        raise ValueError(
+            f"Interval must be numeric minutes for CSV output, got {interval}"
+        )
 
 
 def _resolve_base_url(base_url: Optional[str], testnet: bool) -> str:
@@ -69,7 +71,9 @@ def _resolve_base_url(base_url: Optional[str], testnet: bool) -> str:
     return os.getenv("ZOOMEX_BASE", "https://openapi.zoomex.com")
 
 
-async def _download_public_dataset_history(config: FetchConfig, base_url: str) -> pd.DataFrame:
+async def _download_public_dataset_history(
+    config: FetchConfig, base_url: str
+) -> pd.DataFrame:
     """
     Fallback path for public Bybit/Zoomex-compatible datasets hosted at public.bybit.com.
     Files are organised as:
@@ -81,7 +85,9 @@ async def _download_public_dataset_history(config: FetchConfig, base_url: str) -
     try:
         int(config.interval)
     except ValueError:
-        raise ValueError("Interval must be numeric minutes for public dataset downloads.")
+        raise ValueError(
+            "Interval must be numeric minutes for public dataset downloads."
+        )
 
     def _month_chunks() -> List[tuple[pd.Timestamp, pd.Timestamp]]:
         cursor = start_dt.normalize().replace(day=1)
@@ -101,7 +107,11 @@ async def _download_public_dataset_history(config: FetchConfig, base_url: str) -
             try:
                 async with session.get(url, timeout=ClientTimeout(total=30)) as resp:
                     if resp.status != 200:
-                        logger.warning("Public dataset fetch failed (%s): HTTP %s", url, resp.status)
+                        logger.warning(
+                            "Public dataset fetch failed (%s): HTTP %s",
+                            url,
+                            resp.status,
+                        )
                         continue
                     raw = await resp.read()
             except Exception as exc:  # noqa: BLE001
@@ -123,7 +133,12 @@ async def _download_public_dataset_history(config: FetchConfig, base_url: str) -
                 numeric_cols = ["open", "high", "low", "close", "volume"]
                 df[numeric_cols] = df[numeric_cols].astype(float)
                 if df.empty:
-                    logger.warning("No rows after filtering for %s (%s to %s)", url, start_dt, end_dt)
+                    logger.warning(
+                        "No rows after filtering for %s (%s to %s)",
+                        url,
+                        start_dt,
+                        end_dt,
+                    )
                     continue
                 batches.append(df)
                 logger.info(
@@ -138,11 +153,15 @@ async def _download_public_dataset_history(config: FetchConfig, base_url: str) -
                 continue
 
     if not batches:
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+        return pd.DataFrame(
+            columns=["timestamp", "open", "high", "low", "close", "volume"]
+        )
 
     merged = pd.concat(batches).sort_values("timestamp")
     merged = merged.drop_duplicates(subset=["timestamp"], keep="first")
-    merged["timestamp"] = merged["timestamp"].dt.tz_convert("UTC").dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    merged["timestamp"] = (
+        merged["timestamp"].dt.tz_convert("UTC").dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
     merged = merged[["timestamp", "open", "high", "low", "close", "volume"]]
     return merged
 
@@ -188,7 +207,12 @@ async def download_history(config: FetchConfig) -> pd.DataFrame:
     base_url = _resolve_base_url(config.base_url, config.testnet)
 
     if "public.bybit.com" in base_url:
-        logger.info("Using public dataset base %s for %s %sm.", base_url, config.symbol, config.interval)
+        logger.info(
+            "Using public dataset base %s for %s %sm.",
+            base_url,
+            config.symbol,
+            config.interval,
+        )
         return await _download_public_dataset_history(config, base_url)
 
     async with ClientSession() as session:
@@ -225,9 +249,7 @@ async def download_history(config: FetchConfig) -> pd.DataFrame:
                     limit=config.limit,
                 )
             except ZoomexError as exc:
-                logger.error(
-                    "Kline fetch aborted for %s: %s", config.symbol, exc
-                )
+                logger.error("Kline fetch aborted for %s: %s", config.symbol, exc)
                 break
 
             if df.empty:
@@ -246,20 +268,28 @@ async def download_history(config: FetchConfig) -> pd.DataFrame:
             last_index_ms = int(last_timestamp.timestamp() * 1000)
             next_cursor = last_index_ms + interval_ms
             if next_cursor <= cursor:
-                logger.warning("Pagination stalled (cursor %s, next %s); stopping to avoid loop.", cursor, next_cursor)
+                logger.warning(
+                    "Pagination stalled (cursor %s, next %s); stopping to avoid loop.",
+                    cursor,
+                    next_cursor,
+                )
                 break
             cursor = next_cursor
             await asyncio.sleep(config.sleep_seconds)
 
     if not batches:
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+        return pd.DataFrame(
+            columns=["timestamp", "open", "high", "low", "close", "volume"]
+        )
 
     merged = pd.concat(batches).sort_index()
     merged = merged[~merged.index.duplicated(keep="first")]
 
     merged.reset_index(inplace=True)
     merged.rename(columns={"start": "timestamp"}, inplace=True)
-    merged["timestamp"] = merged["timestamp"].dt.tz_convert("UTC").dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    merged["timestamp"] = (
+        merged["timestamp"].dt.tz_convert("UTC").dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
     merged = merged[["timestamp", "open", "high", "low", "close", "volume"]]
     return merged
 

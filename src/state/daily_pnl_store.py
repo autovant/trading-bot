@@ -43,9 +43,9 @@ class DailyPnlStore:
         accounts = self._data.setdefault("accounts", {})
         account_entry = accounts.setdefault(account_id, {})
         day_entry = account_entry.setdefault(date_key, {"realized_pnl_usd": 0.0})
-        day_entry["realized_pnl_usd"] = float(day_entry.get("realized_pnl_usd", 0.0)) + float(
-            delta_pnl
-        )
+        day_entry["realized_pnl_usd"] = float(
+            day_entry.get("realized_pnl_usd", 0.0)
+        ) + float(delta_pnl)
         self.save()
         return day_entry["realized_pnl_usd"]
 

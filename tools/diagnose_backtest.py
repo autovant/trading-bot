@@ -17,7 +17,6 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import aiohttp
@@ -36,7 +35,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def test_data_fetch(symbol: str, interval: str, days: int, use_testnet: bool):
+async def _test_data_fetch_duplicate(
+    symbol: str, interval: str, days: int, use_testnet: bool
+):
     """Test fetching historical data."""
     logger.info("=" * 60)
     logger.info("Testing Data Fetch")
@@ -50,7 +51,9 @@ async def test_data_fetch(symbol: str, interval: str, days: int, use_testnet: bo
 
     try:
         async with aiohttp.ClientSession() as session:
-            client = ZoomexV3Client(session, base_url=base_url, category="linear", require_auth=False)
+            client = ZoomexV3Client(
+                session, base_url=base_url, category="linear", require_auth=False
+            )
 
             logger.info(f"Fetching {symbol} {interval}m data...")
             df = await client.get_klines(symbol=symbol, interval=interval, limit=200)
@@ -98,15 +101,15 @@ def test_signal_generation(df: pd.DataFrame):
             logger.info(f"  VWAP: ${signals['vwap']:.2f}")
             logger.info(f"  RSI: {signals['rsi']:.2f}")
 
-            if signals['long_signal']:
+            if signals["long_signal"]:
                 logger.info("  ✅ LONG SIGNAL DETECTED!")
 
         # Count signals over entire dataset
         signal_count = 0
         for i in range(35, len(df)):
-            window = df.iloc[:i+1]
+            window = df.iloc[: i + 1]
             signals = compute_signals(window)
-            if signals['long_signal']:
+            if signals["long_signal"]:
                 signal_count += 1
 
         logger.info(f"\n✅ Total signals in dataset: {signal_count}")
@@ -162,7 +165,7 @@ def test_indicators(df: pd.DataFrame):
         return
 
     try:
-        from src.ta_indicators.ta_core import sma, rsi_ema, vwap
+        from src.ta_indicators.ta_core import rsi_ema, sma, vwap
 
         closes = df["close"].astype(float)
 
@@ -204,7 +207,7 @@ def analyze_market_conditions(df: pd.DataFrame):
         return
 
     try:
-        from src.ta_indicators.ta_core import sma, rsi_ema, vwap
+        from src.ta_indicators.ta_core import rsi_ema, sma, vwap
 
         closes = df["close"].astype(float)
         fast_ma = sma(closes, 10)
@@ -219,22 +222,28 @@ def analyze_market_conditions(df: pd.DataFrame):
         # Count MA crossovers
         crossovers = 0
         for i in range(1, len(recent_df)):
-            if fast_ma.iloc[-window+i-1] < slow_ma.iloc[-window+i-1] and \
-               fast_ma.iloc[-window+i] > slow_ma.iloc[-window+i]:
+            if (
+                fast_ma.iloc[-window + i - 1] < slow_ma.iloc[-window + i - 1]
+                and fast_ma.iloc[-window + i] > slow_ma.iloc[-window + i]
+            ):
                 crossovers += 1
 
         logger.info(f"MA Crossovers (last {window} candles): {crossovers}")
 
         # Check price vs VWAP
         above_vwap = (closes.iloc[-window:] > vwap_val.iloc[-window:]).sum()
-        logger.info(f"Candles above VWAP: {above_vwap}/{window} ({above_vwap/window*100:.1f}%)")
+        logger.info(
+            f"Candles above VWAP: {above_vwap}/{window} ({above_vwap/window*100:.1f}%)"
+        )
 
         # Check RSI range
         rsi_in_range = ((rsi.iloc[-window:] > 30) & (rsi.iloc[-window:] < 65)).sum()
-        logger.info(f"RSI in range (30-65): {rsi_in_range}/{window} ({rsi_in_range/window*100:.1f}%)")
+        logger.info(
+            f"RSI in range (30-65): {rsi_in_range}/{window} ({rsi_in_range/window*100:.1f}%)"
+        )
 
         # Current values
-        logger.info(f"\nCurrent values:")
+        logger.info("\nCurrent values:")
         logger.info(f"  Price: ${closes.iloc[-1]:.2f}")
         logger.info(f"  Fast MA: ${fast_ma.iloc[-1]:.2f}")
         logger.info(f"  Slow MA: ${slow_ma.iloc[-1]:.2f}")
@@ -242,7 +251,7 @@ def analyze_market_conditions(df: pd.DataFrame):
         logger.info(f"  RSI: {rsi.iloc[-1]:.2f}")
 
         # Check each condition
-        logger.info(f"\nSignal conditions:")
+        logger.info("\nSignal conditions:")
         logger.info(f"  ✓ Fast > Slow: {fast_ma.iloc[-1] > slow_ma.iloc[-1]}")
         logger.info(f"  ✓ Price > VWAP: {closes.iloc[-1] > vwap_val.iloc[-1]}")
         logger.info(f"  ✓ RSI in range: {30 < rsi.iloc[-1] < 65}")
@@ -304,7 +313,7 @@ async def main():
     logger.info("")
 
     # Test 1: Configuration
-    config = test_configuration(args.config)
+    test_configuration(args.config)
 
     # Test 2: Data Fetch
     df = await test_data_fetch(args.symbol, args.interval, args.days, args.testnet)
@@ -327,6 +336,7 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 
+
 async def test_data_fetch(symbol: str, interval: str, days: int, use_testnet: bool):
     """Test fetching historical data."""
     logger.info("=" * 60)
@@ -343,10 +353,7 @@ async def test_data_fetch(symbol: str, interval: str, days: int, use_testnet: bo
         async with aiohttp.ClientSession() as session:
             # Use require_auth=False for public data endpoints
             client = ZoomexV3Client(
-                session, 
-                base_url=base_url, 
-                category="linear",
-                require_auth=False
+                session, base_url=base_url, category="linear", require_auth=False
             )
 
             logger.info(f"Fetching {symbol} {interval}m data...")
@@ -371,10 +378,7 @@ async def test_data_fetch(symbol: str, interval: str, days: int, use_testnet: bo
         async with aiohttp.ClientSession() as session:
             # Use require_auth=False for public data endpoints
             client = ZoomexV3Client(
-                session, 
-                base_url=base_url, 
-                category="linear",
-                require_auth=False
+                session, base_url=base_url, category="linear", require_auth=False
             )
 
             logger.info(f"Fetching {symbol} {interval}m data...")
@@ -394,16 +398,12 @@ async def test_data_fetch(symbol: str, interval: str, days: int, use_testnet: bo
     except Exception as e:
         logger.error(f"❌ Data fetch failed: {e}", exc_info=True)
         return None
-
 
     try:
         async with aiohttp.ClientSession() as session:
             # Use require_auth=False for public data endpoints
             client = ZoomexV3Client(
-                session, 
-                base_url=base_url, 
-                category="linear",
-                require_auth=False
+                session, base_url=base_url, category="linear", require_auth=False
             )
 
             logger.info(f"Fetching {symbol} {interval}m data...")
@@ -426,7 +426,9 @@ async def test_data_fetch(symbol: str, interval: str, days: int, use_testnet: bo
 
     try:
         async with aiohttp.ClientSession() as session:
-            client = ZoomexV3Client(session, base_url=base_url, category="linear", require_auth=False)
+            client = ZoomexV3Client(
+                session, base_url=base_url, category="linear", require_auth=False
+            )
 
             logger.info(f"Fetching {symbol} {interval}m data...")
             df = await client.get_klines(symbol=symbol, interval=interval, limit=200)
