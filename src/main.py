@@ -117,6 +117,15 @@ class TradingEngine:
             self.session = self.container.session
             self.run_id = self.container.run_id
 
+            if self.strategy:
+                try:
+                    await self.strategy.execution_engine.reconcile_startup()
+                except Exception as e:
+                    logger.error(
+                        "Execution reconciliation failed on startup: %s", e, exc_info=True
+                    )
+                    raise
+
             if hasattr(self.config, "perps"):
                 logger.info("Initializing PerpsService...")
                 try:
@@ -125,6 +134,8 @@ class TradingEngine:
                         self.exchange,
                         trading_config=self.config.trading,
                         crisis_config=self.config.risk_management.crisis_mode,
+                        database=self.database,
+                        mode_name=self.config.app_mode,
                     )
                     await self.perps_service.initialize()
                     logger.info("PerpsService initialized.")
@@ -285,6 +296,7 @@ class TradingEngine:
                 await self.perps_service.run_cycle()
 
             if self.strategy:
+                await self.strategy.execution_engine.reconcile_periodic()
                 await self.strategy.update_market_data()
                 await self.strategy.run_analysis()
         except Exception as e:

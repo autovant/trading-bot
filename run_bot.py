@@ -29,6 +29,8 @@ import aiohttp
 
 from src.app_logging.trade_logger import TradeLogger
 from src.config import PerpsConfig, TradingBotConfig, get_config
+from src.database import DatabaseManager
+from src.exchanges.zoomex_v3 import ZoomexV3Client
 from src.risk.risk_manager import RiskManager
 from src.services.perps import PerpsService
 from src.state.daily_pnl_store import DailyPnlStore
@@ -312,6 +314,7 @@ class TradingBot:
         self.symbol_health_store: Optional[SymbolHealthStore] = None
         self.runtime_health_stop_event: Optional[threading.Event] = None
         self.runtime_health_thread: Optional[threading.Thread] = None
+        self.database: Optional[DatabaseManager] = None
 
     def _require_config(self) -> TradingBotConfig:
         if self.config is None:
@@ -341,14 +344,28 @@ class TradingBot:
         trade_log_path = Path(self.trade_log_csv or "results/live_trades.csv")
         self.trade_logger = TradeLogger(trade_log_path)
 
+        self.database = DatabaseManager(self.config.database.url)
+        await self.database.initialize()
+
         if hasattr(self.config, "perps") and self.config.perps.enabled:
+            exchange = ZoomexV3Client(
+                self.session,
+                base_url=self.config.exchange.base_url,
+                api_key=self.config.exchange.api_key,
+                api_secret=self.config.exchange.secret_key,
+                mode_name=self.mode,
+                max_requests_per_second=self.config.perps.maxRequestsPerSecond,
+                max_requests_per_minute=self.config.perps.maxRequestsPerMinute,
+            )
             self.perps_service = PerpsService(
                 self.config.perps,
-                self.session,
+                exchange,
                 trading_config=self.config.trading,
                 crisis_config=self.config.risk_management.crisis_mode,
                 trade_logger=self.trade_logger,
                 config_id=self.active_config_id,
+                database=self.database,
+                mode_name=self.mode,
             )
             await self.perps_service.initialize()
             logger.info("Perps service initialized successfully")
@@ -642,6 +659,11 @@ class TradingBot:
             logger.info("  - No real orders will be placed")
             logger.info("  - All signals and decisions will be logged")
         elif self.mode == "testnet":
+            if hasattr(self.config, "exchange") and not self.config.exchange.testnet:
+                logger.warning(
+                    "Mode is 'testnet' but exchange config has testnet=false"
+                )
+                self.config.exchange.testnet = True
             if not self.config.perps.useTestnet:
                 logger.warning("Mode is 'testnet' but config has useTestnet=false")
                 logger.warning("Forcing useTestnet=true for safety")
@@ -650,6 +672,11 @@ class TradingBot:
             logger.info("  - Orders will be placed on testnet")
             logger.info("  - Using testnet API keys")
         elif self.mode == "live":
+            if hasattr(self.config, "exchange") and self.config.exchange.testnet:
+                logger.error("Mode is 'live' but exchange config has testnet=true")
+                raise ValueError(
+                    "Configuration mismatch: live mode requires exchange.testnet=false"
+                )
             if self.config.perps.useTestnet:
                 logger.error("Mode is 'live' but config has useTestnet=true")
                 logger.error("This would place orders on testnet, not mainnet")
@@ -676,7 +703,6 @@ class TradingBot:
                 "ZOOMEX_API_KEY and ZOOMEX_API_SECRET environment variables must be set"
             )
 
-        logger.info(f"API Key: {api_key[:8]}...{api_key[-4:]}")
         logger.info(f"Symbol: {self.config.perps.symbol}")
         logger.info(f"Interval: {self.config.perps.interval}m")
         logger.info(f"Leverage: {self.config.perps.leverage}x")
@@ -773,6 +799,10 @@ class TradingBot:
         if self.session:
             await self.session.close()
             logger.info("HTTP session closed")
+
+        if self.database:
+            await self.database.close()
+            logger.info("Database connection closed")
 
         logger.info("Shutdown complete")
 

@@ -116,6 +116,7 @@ class TradingStrategy:
 
         self.risk_state = None
         self.processing_orders: set[str] = set()
+        self.data_stale_block_active = False
 
         # Performance tracking
         self.total_trades = 0
@@ -192,6 +193,7 @@ class TradingStrategy:
         "Update market data for all symbols and timeframes."
         try:
             market_updates = []
+            stale_detected = False
 
             for symbol in self.config.trading.symbols:
                 if symbol not in self.market_data:
@@ -212,6 +214,14 @@ class TradingStrategy:
                     )
 
                     if data is not None and not data.empty:
+                        if self._is_stale_market_data(data, timeframe):
+                            stale_detected = True
+                            logger.error(
+                                "SAFETY_STALE_DATA: Blocking trading for %s due to stale %s data",
+                                symbol,
+                                timeframe,
+                            )
+                            continue
                         self.market_data[symbol][tf_name] = data
                         logger.debug(
                             f"Updated {symbol} {timeframe} data: {len(data)} bars"
@@ -238,6 +248,7 @@ class TradingStrategy:
 
                 if self.paper_broker and signal_snapshot:
                     await self.paper_broker.update_market(signal_snapshot)
+            self.data_stale_block_active = stale_detected
 
             # Publish market data to messaging system
             if self.messaging and market_updates:
@@ -282,6 +293,53 @@ class TradingStrategy:
             timestamp=datetime.now(timezone.utc),
         )
         return snapshot
+
+    @staticmethod
+    def _timeframe_to_timedelta(timeframe: str) -> Optional[pd.Timedelta]:
+        value = timeframe.strip().lower()
+        try:
+            if value.endswith("m"):
+                minutes = int(value[:-1])
+                return pd.Timedelta(minutes=minutes)
+            if value.endswith("h"):
+                hours = int(value[:-1])
+                return pd.Timedelta(hours=hours)
+            if value.endswith("d"):
+                days = int(value[:-1])
+                return pd.Timedelta(days=days)
+            minutes = int(value)
+            return pd.Timedelta(minutes=minutes)
+        except (ValueError, TypeError):
+            return None
+
+    def _is_stale_market_data(self, data: pd.DataFrame, timeframe: str) -> bool:
+        if data.empty:
+            return True
+        delta = self._timeframe_to_timedelta(timeframe)
+        if not delta:
+            return False
+        if "timestamp" in data.columns:
+            last_ts = pd.to_datetime(data["timestamp"].iloc[-1], utc=True)
+        else:
+            last_ts = data.index[-1]
+        now = pd.Timestamp.utcnow()
+        staleness = now - last_ts
+        if staleness > delta * 2:
+            logger.warning(
+                "SAFETY_STALE_DATA: %s data stale by %s", timeframe, staleness
+            )
+            return True
+        if len(data) >= 2:
+            gap = data.index[-1] - data.index[-2]
+            if gap > delta * 2:
+                logger.warning(
+                    "SAFETY_DATA_GAP: %s gap %s exceeds expected %s",
+                    timeframe,
+                    gap,
+                    delta,
+                )
+                return True
+        return False
 
     def _generate_client_id(self, symbol: str) -> str:
         return (
@@ -463,6 +521,12 @@ class TradingStrategy:
         "Delegate execution to ExecutionEngine."
         if symbol in self.processing_orders:
             logger.info(f"Signal ignored for {symbol}: Order processing in progress")
+            return
+        if self.data_stale_block_active:
+            logger.warning(
+                "SAFETY_STALE_DATA: Blocking signal execution for %s due to stale data",
+                symbol,
+            )
             return
 
         self.processing_orders.add(symbol)

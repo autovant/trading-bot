@@ -275,3 +275,31 @@ class CCXTClient:
         except Exception as e:
             logger.error(f"Error cancelling orders for {symbol}: {e}")
             raise
+
+    @retry_read
+    async def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        if not self.exchange:
+            return []
+        if not hasattr(self.exchange, "fetch_open_orders"):
+            return []
+        try:
+            if symbol:
+                return await self.exchange.fetch_open_orders(symbol)
+            return await self.exchange.fetch_open_orders()
+        except Exception as e:
+            logger.error("Error fetching open orders: %s", e)
+            return []
+
+    @retry_read
+    async def get_my_trades(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        if not self.exchange:
+            return []
+        if not hasattr(self.exchange, "fetch_my_trades"):
+            return []
+        try:
+            if symbol:
+                return await self.exchange.fetch_my_trades(symbol)
+            return await self.exchange.fetch_my_trades()
+        except Exception as e:
+            logger.error("Error fetching trades: %s", e)
+            return []

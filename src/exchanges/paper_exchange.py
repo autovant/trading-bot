@@ -115,3 +115,13 @@ class PaperExchange(IExchange):
         if not self.ccxt_client:
             return None
         return await self.ccxt_client.get_order_book(symbol, limit)
+
+    async def get_open_orders(
+        self, symbol: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        return await self.paper_broker.get_open_orders(symbol)
+
+    async def get_recent_trades(
+        self, symbol: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        return await self.paper_broker.get_recent_trades(symbol)

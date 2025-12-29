@@ -20,6 +20,18 @@ class ZoomexError(RuntimeError):
     pass
 
 
+def _parse_server_time_ms(payload: Dict[str, Any]) -> int:
+    if not isinstance(payload, dict):
+        raise ZoomexError("Unexpected time payload")
+    if "timeSecond" in payload:
+        return int(payload["timeSecond"]) * 1000
+    if "timeNano" in payload:
+        return int(int(payload["timeNano"]) / 1_000_000)
+    if "time" in payload:
+        return int(payload["time"])
+    raise ZoomexError("Server time missing in response")
+
+
 @dataclass
 class Precision:
     qty_step: float
@@ -55,6 +67,8 @@ class ZoomexV3Client:
         self._last_request_time = 0.0
         self._request_count_minute = 0
         self._last_minute_start = time.time()
+        self._time_offset_ms = 0
+        self._last_time_sync = 0.0
 
         if require_auth and (not self.api_key or not self.api_secret):
             raise ValueError("ZOOMEX_API_KEY and ZOOMEX_API_SECRET must be set")
@@ -62,6 +76,9 @@ class ZoomexV3Client:
     @staticmethod
     def _ts_ms() -> str:
         return str(int(time.time() * 1000))
+
+    def _ts_ms_with_offset(self) -> str:
+        return str(int(time.time() * 1000 + self._time_offset_ms))
 
     def _sign(self, payload: str) -> str:
         message = f"{payload}".encode()
@@ -73,7 +90,7 @@ class ZoomexV3Client:
     def _headers(self, payload: str) -> Dict[str, str]:
         if self.api_key is None:
             raise ZoomexError("Zoomex API key not configured")
-        timestamp = self._ts_ms()
+        timestamp = self._ts_ms_with_offset()
         sign_payload = f"{timestamp}{self.api_key}{RECV_WINDOW}{payload}"
         signature = self._sign(sign_payload)
         return {
@@ -134,6 +151,23 @@ class ZoomexV3Client:
                 await asyncio.sleep(backoff)
                 backoff *= 2
         raise ZoomexError("Zoomex request failed after retries")
+
+    async def sync_time(self, *, server_time_ms: Optional[int] = None) -> int:
+        if server_time_ms is None:
+            payload = await self._request("GET", "/v3/public/time")
+            server_time_ms = _parse_server_time_ms(payload)
+        local_ms = int(time.time() * 1000)
+        self._time_offset_ms = int(server_time_ms - local_ms)
+        self._last_time_sync = time.time()
+        return self._time_offset_ms
+
+    @property
+    def time_offset_ms(self) -> int:
+        return int(self._time_offset_ms)
+
+    @property
+    def last_time_sync(self) -> float:
+        return self._last_time_sync
 
     async def _rate_limit(self) -> None:
         now = time.time()
@@ -337,6 +371,9 @@ class ZoomexV3Client:
                 return float(coin.get("equity", "0"))
         raise ZoomexError("USDT equity not found in wallet")
 
+    async def get_account_balance(self) -> Dict[str, Any]:
+        return await self.get_wallet_balance()
+
     async def get_position_qty(self, symbol: str, position_idx: int) -> float:
         positions_data = await self.get_positions(symbol=symbol)
         if "list" not in positions_data:
@@ -439,6 +476,26 @@ class ZoomexV3Client:
             "availableBalance": available,
             "found": found,
         }
+
+    async def get_open_orders(self, symbol: str) -> Dict[str, Any]:
+        params = {
+            "category": self.category,
+            "symbol": symbol,
+            "openOnly": 1,
+        }
+        return await self._request(
+            "GET", "/v3/private/order/realtime", params=params, signed=True
+        )
+
+    async def get_fills(self, symbol: str, limit: int = 50) -> Dict[str, Any]:
+        params = {
+            "category": self.category,
+            "symbol": symbol,
+            "limit": limit,
+        }
+        return await self._request(
+            "GET", "/v3/private/execution/list", params=params, signed=True
+        )
 
     async def get_closed_pnl(
         self, symbol: str, start_time: Optional[int] = None, limit: int = 50

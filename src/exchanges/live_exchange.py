@@ -133,3 +133,13 @@ class LiveExchange(IExchange):
         self, symbol: str, limit: int = 20
     ) -> Optional[Dict[str, Any]]:
         return await self.ccxt_client.get_order_book(symbol, limit)
+
+    async def get_open_orders(
+        self, symbol: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        return await self.ccxt_client.get_open_orders(symbol)
+
+    async def get_recent_trades(
+        self, symbol: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        return await self.ccxt_client.get_my_trades(symbol)
