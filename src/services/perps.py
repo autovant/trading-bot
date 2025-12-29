@@ -12,7 +12,7 @@ from src.alerts.base import AlertSink
 from src.alerts.manager import AlertManager
 from src.app_logging.trade_logger import TradeLogger
 from src.config import CrisisModeConfig, PerpsConfig, TradingConfig
-from src.database import DatabaseManager
+from src.database import DatabaseManager, OrderIntent
 from src.engine.order_id_generator import generate_order_id
 from src.engine.order_intent_ledger import OrderIntentLedger
 from src.engine.perps_executor import (
@@ -1136,6 +1136,9 @@ class PerpsService:
                     )
                     if not intent:
                         continue
+                    prev_filled = float(intent.filled_qty or 0.0)
+                    new_filled = float(agg["qty"])
+                    delta = new_filled - prev_filled
                     avg_price = agg["cost"] / agg["qty"] if agg["qty"] else None
                     status = (
                         "filled"
@@ -1148,8 +1151,39 @@ class PerpsService:
                         filled_qty=agg["qty"],
                         avg_fill_price=avg_price,
                     )
+                    if delta > 0 and avg_price:
+                        await self._apply_fill_delta(
+                            intent=intent,
+                            filled_delta=delta,
+                            avg_price=avg_price,
+                        )
         except Exception as exc:
             logger.error("Order reconciliation failed: %s", exc, exc_info=True)
+
+    async def _apply_fill_delta(
+        self, *, intent: OrderIntent, filled_delta: float, avg_price: float
+    ) -> None:
+        if filled_delta <= 0:
+            return
+        if intent.reduce_only:
+            self.current_position_qty = max(
+                self.current_position_qty - filled_delta, 0.0
+            )
+            if self.risk_manager:
+                self.risk_manager.adjust_open_position(
+                    self.config.symbol,
+                    -(filled_delta * avg_price),
+                    self.config.riskPct,
+                )
+            return
+
+        self.current_position_qty += filled_delta
+        if self.risk_manager:
+            self.risk_manager.adjust_open_position(
+                self.config.symbol,
+                filled_delta * avg_price,
+                self.config.riskPct,
+            )
 
     async def _check_risk_limits(self) -> bool:
         if self.reconciliation_block_active:
