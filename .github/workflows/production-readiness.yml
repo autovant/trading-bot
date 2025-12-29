@@ -17,10 +17,15 @@ on:
           - testnet
           - live
 
+permissions:
+  contents: read
+
 jobs:
   production-readiness:
     name: Production Readiness Validation
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     
     steps:
       - name: Checkout code
@@ -74,6 +79,8 @@ jobs:
     name: Integration Tests
     runs-on: ubuntu-latest
     needs: production-readiness
+    permissions:
+      contents: read
     
     steps:
       - name: Checkout code
@@ -106,6 +113,8 @@ jobs:
   config-validation:
     name: Configuration Validation
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     
     steps:
       - name: Checkout code
@@ -192,6 +201,8 @@ jobs:
   documentation-check:
     name: Documentation Completeness
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     
     steps:
       - name: Checkout code
@@ -258,6 +269,8 @@ jobs:
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     
     steps:
       - name: Checkout code
@@ -322,6 +335,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [production-readiness, integration-tests, config-validation, documentation-check, security-scan]
     if: always()
+    permissions:
+      contents: read
     
     steps:
       - name: Check job statuses
