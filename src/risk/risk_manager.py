@@ -49,6 +49,22 @@ class RiskManager:
             self.open_risk_by_symbol.get(symbol_key, 0.0) + risk_value
         )
 
+    def adjust_open_position(
+        self, symbol: str, notional_delta: float, per_trade_risk_pct: float
+    ) -> None:
+        """Adjust open risk for a symbol based on incremental fills."""
+        symbol_key = symbol.upper()
+        if notional_delta == 0:
+            return
+        risk_delta = self._risk_value(abs(notional_delta), per_trade_risk_pct)
+        if notional_delta < 0:
+            risk_delta = -risk_delta
+        updated = self.open_risk_by_symbol.get(symbol_key, 0.0) + risk_delta
+        if updated <= 0:
+            self.open_risk_by_symbol.pop(symbol_key, None)
+        else:
+            self.open_risk_by_symbol[symbol_key] = updated
+
     def register_close_position(self, symbol: str, realized_pnl: float) -> None:
         """Reduce open risk for a symbol and aggregate realized PnL."""
         symbol_key = symbol.upper()

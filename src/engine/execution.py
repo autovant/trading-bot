@@ -132,7 +132,7 @@ class ExecutionEngine:
                 intent.idempotency_key,
                 intent.status,
             )
-            await self._reconcile_intent(intent)
+            await self._reconcile_all_intents(reason="idempotency_check")
             return None
 
         try:
