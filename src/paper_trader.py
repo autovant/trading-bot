@@ -118,6 +118,29 @@ class PaperBroker:
     # Public API
     # ------------------------------------------------------------------ #
 
+    async def get_open_orders(self, symbol: Optional[str] = None) -> List[Order]:
+        async with self._lock:
+            orders: List[Order] = []
+            if symbol:
+                orders.extend(
+                    [rest.order for rest in self._resting_limits.get(symbol, [])]
+                )
+            else:
+                for rest_list in self._resting_limits.values():
+                    orders.extend([rest.order for rest in rest_list])
+
+            for stop in self._stop_orders.values():
+                if symbol and stop.order.symbol != symbol:
+                    continue
+                orders.append(stop.order)
+            return orders
+
+    async def get_recent_trades(self, symbol: Optional[str] = None) -> List[Trade]:
+        return await self.database.get_trades(
+            symbol=symbol,
+            run_id=self.run_id,
+        )
+
     async def place_order(
         self,
         symbol: str,

@@ -9,10 +9,12 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 from src.alerts.base import AlertSink
-from src.alerts.logging_sink import LoggingAlertSink
+from src.alerts.manager import AlertManager
 from src.app_logging.trade_logger import TradeLogger
 from src.config import CrisisModeConfig, PerpsConfig, TradingConfig
+from src.database import DatabaseManager
 from src.engine.order_id_generator import generate_order_id
+from src.engine.order_intent_ledger import OrderIntentLedger
 from src.engine.perps_executor import (
     early_exit_reduce_only,
     enter_long_with_brackets,
@@ -47,6 +49,8 @@ class PerpsService:
         config_id: Optional[str] = None,
         symbol_health_store: Optional[SymbolHealthStore] = None,
         warning_size_multiplier: float = 1.0,
+        database: Optional[DatabaseManager] = None,
+        mode_name: Optional[str] = None,
     ):
         self.config = config
         self.exchange = exchange
@@ -63,7 +67,7 @@ class PerpsService:
         self.session_trades: int = 0
         self.trading_config = trading_config
         self.crisis_config = crisis_config
-        self.alert_sink: AlertSink = alert_sink or LoggingAlertSink()
+        self.alert_sink: AlertSink = alert_sink or AlertManager()
         self.risk_manager = risk_manager
         self.trade_logger = trade_logger
         self.config_id = config_id
@@ -85,6 +89,20 @@ class PerpsService:
         self.drawdown_threshold = (
             crisis_config.drawdown_threshold if crisis_config else 0.10
         )
+        self.database = database
+        self.mode_name = mode_name or ("paper" if self.config.useTestnet else "live")
+        self.intent_ledger = (
+            OrderIntentLedger(
+                database=self.database,
+                mode="paper" if self.mode_name == "paper" else "live",
+                run_id=self.config_id or "perps",
+            )
+            if self.database
+            else None
+        )
+        self.data_stale_block_active = False
+        self._last_reconcile_at: Optional[datetime] = None
+        self._last_time_sync_at: Optional[datetime] = None
         state_file = self.config.stateFile or "data/perps_state.json"
         self.state_path = Path(state_file)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,8 +128,14 @@ class PerpsService:
             logger.info("Perps trading disabled")
             return
 
+        if self.mode_name == "live" and not self.database:
+            raise ValueError("PerpsService requires a database for live trading.")
+
         # Initialize exchange client (it might already be initialized by main, but safe to call again)
-        await self.exchange.initialize()
+        if hasattr(self.exchange, "initialize"):
+            await self.exchange.initialize()
+
+        await self._sync_time_or_halt()
 
         await self._refresh_account_state()
 
@@ -119,6 +143,7 @@ class PerpsService:
             self.risk_manager.update_equity(self.equity_usdt)
 
         await self._reconcile_positions()
+        await self._reconcile_open_orders(reason="startup")
         self._load_persisted_state()
         self.session_start_time = datetime.now(timezone.utc)
 
@@ -135,6 +160,7 @@ class PerpsService:
             return
 
         try:
+            await self._sync_time_or_halt(periodic=True)
             await self._refresh_account_state()
             await self._check_position_pnl()
 
@@ -143,6 +169,8 @@ class PerpsService:
 
             if not await self._check_session_limits():
                 return
+
+            await self._reconcile_open_orders(reason="periodic")
 
             ltf_limit = 100
             if self.config.useMultiTfAtrStrategy:
@@ -184,12 +212,19 @@ class PerpsService:
                 logger.debug("Waiting for full indicator warmup on closed candles")
                 return
 
+            if self._handle_stale_data(closed_df, self.interval_delta, label="LTF"):
+                return
+
             closed_htf = None
             if self.config.useMultiTfAtrStrategy:
                 if htf_df is None or htf_df.empty or len(htf_df) < 200:
                     logger.warning("Insufficient HTF klines data for trend filter")
                     return
                 closed_htf = self._closed_candle_view(htf_df, delta=htf_interval_delta)
+                if closed_htf is not None and self._handle_stale_data(
+                    closed_htf, htf_interval_delta, label="HTF"
+                ):
+                    return
 
             last_closed_time = closed_df.index[-1]
             if self.last_candle_time == last_closed_time:
@@ -429,6 +464,83 @@ class PerpsService:
             return df.iloc[:-1]
         return df
 
+    def _handle_stale_data(
+        self, df: pd.DataFrame, interval_delta: Optional[timedelta], *, label: str
+    ) -> bool:
+        if df.empty:
+            return False
+        interval = interval_delta or self.interval_delta
+        last_ts = df.index[-1]
+        now = datetime.now(timezone.utc)
+        staleness = (now - last_ts).total_seconds()
+        if staleness > self.config.maxDataStalenessSeconds:
+            self.data_stale_block_active = True
+            logger.warning(
+                "SAFETY_STALE_DATA: %s candle stale by %.0fs (limit=%ss)",
+                label,
+                staleness,
+                self.config.maxDataStalenessSeconds,
+            )
+            asyncio.create_task(
+                self.alert_sink.send_alert(
+                    "critical_stale_data",
+                    f"{label} candle stale by {staleness:.0f}s",
+                    {"symbol": self.config.symbol, "staleness_s": staleness},
+                )
+            )
+            return True
+
+        if len(df) >= 2:
+            gap = (df.index[-1] - df.index[-2]).total_seconds()
+            max_gap = interval.total_seconds() * self.config.maxDataGapMultiplier
+            if gap > max_gap:
+                self.data_stale_block_active = True
+                logger.warning(
+                    "SAFETY_DATA_GAP: %s candle gap %.0fs exceeds limit %.0fs",
+                    label,
+                    gap,
+                    max_gap,
+                )
+                asyncio.create_task(
+                    self.alert_sink.send_alert(
+                        "critical_stale_data_gap",
+                        f"{label} candle gap {gap:.0f}s exceeds {max_gap:.0f}s",
+                        {"symbol": self.config.symbol, "gap_s": gap},
+                    )
+                )
+                return True
+
+        self.data_stale_block_active = False
+        return False
+
+    async def _sync_time_or_halt(self, periodic: bool = False) -> None:
+        if not hasattr(self.exchange, "sync_time"):
+            return
+        now = datetime.now(timezone.utc)
+        if periodic and self._last_time_sync_at:
+            elapsed = (now - self._last_time_sync_at).total_seconds()
+            if elapsed < self.config.timeSyncIntervalSeconds:
+                return
+        offset_ms = await self.exchange.sync_time()
+        self._last_time_sync_at = now
+        if abs(offset_ms) > self.config.timeSyncMaxSkewMs:
+            self.reconciliation_block_active = True
+            logger.error(
+                "SAFETY_TIME_DRIFT: Offset %dms exceeds limit %dms; halting entries",
+                offset_ms,
+                self.config.timeSyncMaxSkewMs,
+            )
+            await self.alert_sink.send_alert(
+                "critical_time_drift",
+                "Server time drift exceeded limit; trading halted.",
+                {
+                    "symbol": self.config.symbol,
+                    "offset_ms": offset_ms,
+                    "limit_ms": self.config.timeSyncMaxSkewMs,
+                },
+            )
+            raise ZoomexError("Time drift exceeded maximum threshold")
+
     @staticmethod
     def _safe_float(value: Any) -> Optional[float]:
         try:
@@ -517,7 +629,13 @@ class PerpsService:
         }
 
     async def _refresh_account_state(self) -> None:
-        balance = await self.exchange.get_account_balance()
+        balance = None
+        if hasattr(self.exchange, "get_account_balance"):
+            balance = await self.exchange.get_account_balance()
+        elif hasattr(self.exchange, "get_wallet_balance"):
+            balance = await self.exchange.get_wallet_balance()
+        elif hasattr(self.exchange, "get_balance"):
+            balance = await self.exchange.get_balance()
         if balance:
             # Assuming balance structure matches what we expect or we need to adapt it
             # ExchangeClient.get_account_balance returns a dict, likely from CCXT or PaperBroker
@@ -729,6 +847,45 @@ class PerpsService:
             timestamp=entry_timestamp,
         )
 
+        if self.intent_ledger:
+            idempotency_key = self.intent_ledger.build_idempotency_key(
+                {
+                    "symbol": self.config.symbol,
+                    "side": "buy",
+                    "order_type": "market",
+                    "quantity": round(rounded_qty, 8),
+                    "price": round(price, 8),
+                    "stop_price": round(sl_price, 8),
+                    "take_profit": round(tp_price, 8),
+                    "order_link_id": order_link_id,
+                    "timestamp": entry_timestamp.isoformat(),
+                }
+            )
+            intent, created = await self.intent_ledger.get_or_create_intent(
+                idempotency_key=idempotency_key,
+                client_id=order_link_id,
+                symbol=self.config.symbol,
+                side="buy",
+                order_type="market",
+                quantity=rounded_qty,
+                price=price,
+                stop_price=sl_price,
+                reduce_only=False,
+            )
+            if not created and not OrderIntentLedger.is_terminal(intent.status):
+                logger.warning(
+                    "Order intent already exists (%s); skipping duplicate submit",
+                    intent.idempotency_key,
+                )
+                await self._reconcile_open_orders(reason="duplicate_intent")
+                return
+        elif self.mode_name == "live":
+            logger.error(
+                "SAFETY_RECON_BLOCK: Order intent ledger missing for live trading."
+            )
+            self.reconciliation_block_active = True
+            return
+
         result = await enter_long_with_brackets(
             self.exchange,
             symbol=self.config.symbol,
@@ -739,6 +896,14 @@ class PerpsService:
             trigger_by=self.config.triggerBy,
             order_link_id=order_link_id,
         )
+
+        if self.intent_ledger and isinstance(result, dict):
+            order_id = result.get("orderId") or result.get("order_id")
+            await self.intent_ledger.update_intent_status(
+                intent,
+                status="acked",
+                order_id=order_id,
+            )
 
         self.current_position_qty = rounded_qty
         self.entry_equity = self.equity_usdt
@@ -873,11 +1038,130 @@ class PerpsService:
         except Exception as e:
             logger.error("Position reconciliation failed: %s", e, exc_info=True)
 
+    async def _reconcile_open_orders(self, *, reason: str) -> None:
+        if not hasattr(self.exchange, "get_open_orders"):
+            return
+        now = datetime.now(timezone.utc)
+        if reason == "periodic" and self._last_reconcile_at:
+            elapsed = (now - self._last_reconcile_at).total_seconds()
+            if elapsed < 30:
+                return
+        self._last_reconcile_at = now
+        try:
+            response = await self.exchange.get_open_orders(self.config.symbol)
+            open_orders = response.get("list", []) if isinstance(response, dict) else []
+            if not open_orders:
+                return
+
+            if not self.intent_ledger or not self.database:
+                self.reconciliation_block_active = True
+                logger.error(
+                    "SAFETY_RECON_BLOCK: Open orders detected but intent ledger unavailable."
+                )
+                await self.alert_sink.send_alert(
+                    "critical_reconciliation",
+                    "Open orders found but no intent ledger configured.",
+                    {"symbol": self.config.symbol, "reason": reason},
+                )
+                return
+
+            intents = await self.database.list_open_order_intents(
+                self.intent_ledger.mode, self.intent_ledger.run_id
+            )
+            intents_by_client = {intent.client_id: intent for intent in intents}
+            unknown_orders = []
+
+            for order in open_orders:
+                client_id = (
+                    order.get("orderLinkId")
+                    or order.get("clientOrderId")
+                    or order.get("client_id")
+                )
+                order_id = order.get("orderId") or order.get("order_id")
+                if not client_id or client_id not in intents_by_client:
+                    unknown_orders.append(order_id or client_id or "unknown")
+                    continue
+                intent = intents_by_client[client_id]
+                await self.intent_ledger.update_intent_status(
+                    intent, status="acked", order_id=order_id
+                )
+
+            if unknown_orders:
+                self.reconciliation_block_active = True
+                logger.error(
+                    "SAFETY_RECON_BLOCK: Unknown open orders detected: %s",
+                    ", ".join(unknown_orders),
+                )
+                await self.alert_sink.send_alert(
+                    "critical_reconciliation",
+                    "Unknown open orders detected; trading halted.",
+                    {"symbol": self.config.symbol, "orders": unknown_orders},
+                )
+
+            if hasattr(self.exchange, "get_fills"):
+                fills_resp = await self.exchange.get_fills(self.config.symbol)
+                fills = fills_resp.get("list", []) if isinstance(fills_resp, dict) else []
+                fill_agg: Dict[str, Dict[str, float]] = {}
+                for fill in fills:
+                    client_id = fill.get("orderLinkId") or fill.get("clientOrderId")
+                    if not client_id or client_id not in intents_by_client:
+                        continue
+                    intent = intents_by_client[client_id]
+                    trade_id = str(fill.get("execId") or fill.get("tradeId") or "")
+                    if not trade_id:
+                        continue
+                    qty = float(fill.get("execQty") or fill.get("qty") or 0.0)
+                    price = float(fill.get("execPrice") or fill.get("price") or 0.0)
+                    side = str(fill.get("side") or intent.side)
+                    agg = fill_agg.setdefault(
+                        intent.idempotency_key, {"qty": 0.0, "cost": 0.0}
+                    )
+                    agg["qty"] += qty
+                    agg["cost"] += qty * price
+                    await self.intent_ledger.record_fill(
+                        intent=intent,
+                        trade_id=trade_id,
+                        order_id=str(fill.get("orderId") or intent.order_id or ""),
+                        symbol=str(fill.get("symbol") or self.config.symbol),
+                        side=side,
+                        quantity=qty,
+                        price=price,
+                        fee=float(fill.get("execFee") or 0.0),
+                        timestamp=self._parse_timestamp_value(fill.get("execTime")),
+                    )
+                for key, agg in fill_agg.items():
+                    intent = next(
+                        (intent for intent in intents_by_client.values() if intent.idempotency_key == key),
+                        None,
+                    )
+                    if not intent:
+                        continue
+                    avg_price = agg["cost"] / agg["qty"] if agg["qty"] else None
+                    status = (
+                        "filled"
+                        if agg["qty"] >= intent.quantity
+                        else "partially_filled"
+                    )
+                    await self.intent_ledger.update_intent_status(
+                        intent,
+                        status=status,
+                        filled_qty=agg["qty"],
+                        avg_fill_price=avg_price,
+                    )
+        except Exception as exc:
+            logger.error("Order reconciliation failed: %s", exc, exc_info=True)
+
     async def _check_risk_limits(self) -> bool:
         if self.reconciliation_block_active:
             logger.warning(
                 "SAFETY_RECON_BLOCK: Reconciliation guard active; refusing new entries until the "
                 "existing exchange position is resolved."
+            )
+            return False
+
+        if self.data_stale_block_active:
+            logger.warning(
+                "SAFETY_STALE_DATA: Market data stale; refusing new entries."
             )
             return False
 

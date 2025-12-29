@@ -71,6 +71,24 @@ def _substitute_env_vars(data: Any) -> Any:
     return data
 
 
+def _assert_no_literal_secrets(raw_data: Dict[str, Any]) -> None:
+    exchange_cfg = raw_data.get("exchange") or {}
+    for key in ("api_key", "secret_key", "passphrase"):
+        value = exchange_cfg.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("${") and stripped.endswith("}"):
+                continue
+        raise ValueError(
+            f"Secrets must not be stored in config files (exchange.{key}). "
+            "Use environment variables instead."
+        )
+
+
 class StrictModel(BaseModel):
     """Pydantic helper that rejects unknown keys and validates on assignment."""
 
@@ -135,6 +153,10 @@ class PerpsConfig(StrictModel):
     stateFile: Optional[str] = "data/perps_state.json"
     sessionMaxTrades: Optional[int] = Field(default=None, ge=1)
     sessionMaxRuntimeMinutes: Optional[int] = Field(default=None, ge=1)
+    maxDataStalenessSeconds: int = Field(default=120, ge=1)
+    maxDataGapMultiplier: float = Field(default=2.5, ge=1.0)
+    timeSyncIntervalSeconds: int = Field(default=60, ge=1)
+    timeSyncMaxSkewMs: int = Field(default=1000, ge=0)
 
     @model_validator(mode="after")
     def _validate_mode(self) -> "PerpsConfig":
@@ -550,6 +572,10 @@ class TradingBotConfig(BaseSettings):
                 raise ValueError(
                     "API key and secret key are required when APP_MODE=live."
                 )
+            if self.exchange.testnet:
+                raise ValueError("Live mode cannot use testnet exchange endpoints.")
+            if self.perps.useTestnet:
+                raise ValueError("Live mode cannot use testnet perps endpoints.")
         return self
 
 
@@ -577,6 +603,8 @@ def load_config(config_path: Optional[str] = None) -> TradingBotConfig:
     )
     with strategy_path.open("r", encoding="utf-8") as handle:
         raw_data = yaml.safe_load(handle) or {}
+
+    _assert_no_literal_secrets(raw_data)
 
     config_data = _substitute_env_vars(raw_data)
 

@@ -74,3 +74,11 @@ class IExchange(Protocol):
     ) -> Optional[Dict[str, Any]]:
         """Fetch order book."""
         ...
+
+    async def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch open orders."""
+        ...
+
+    async def get_recent_trades(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch recent trades/fills."""
+        ...

@@ -106,6 +106,70 @@ class Position(DBModel):
     updated_at: Optional[datetime] = None
 
 
+class OrderIntent(DBModel):
+    id: Optional[int] = None
+    idempotency_key: str
+    client_id: str
+    order_id: Optional[str] = None
+    symbol: str
+    side: str
+    order_type: str
+    quantity: float
+    price: Optional[float] = None
+    stop_price: Optional[float] = None
+    reduce_only: bool = False
+    status: str = "created"
+    filled_qty: float = 0.0
+    avg_fill_price: Optional[float] = None
+    last_error: Optional[str] = None
+    mode: Mode = "paper"
+    run_id: str = "default"
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    @field_validator("idempotency_key", "client_id", "run_id")
+    @classmethod
+    def _intent_key_present(cls, value: str) -> str:
+        if not value:
+            raise ValueError("idempotency_key/client_id/run_id must be provided")
+        return value
+
+
+class OrderIntentEvent(DBModel):
+    id: Optional[int] = None
+    idempotency_key: str
+    status: str
+    details: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    @field_validator("idempotency_key", "status")
+    @classmethod
+    def _intent_event_present(cls, value: str) -> str:
+        if not value:
+            raise ValueError("intent event fields must be provided")
+        return value
+
+
+class OrderFill(DBModel):
+    id: Optional[int] = None
+    idempotency_key: str
+    trade_id: str
+    order_id: Optional[str] = None
+    symbol: str
+    side: str
+    quantity: float
+    price: float
+    fee: float = 0.0
+    timestamp: Optional[datetime] = None
+
+    @field_validator("idempotency_key", "trade_id")
+    @classmethod
+    def _fill_identifiers_present(cls, value: str) -> str:
+        if not value:
+            raise ValueError("fill identifiers must be provided")
+        return value
+
+
 class PnLEntry(DBModel):
     id: Optional[int] = None
     symbol: str
@@ -186,6 +250,24 @@ class DatabaseBackend:
         raise NotImplementedError
 
     async def create_trade(self, trade: Trade) -> Optional[int]:
+        raise NotImplementedError
+
+    async def create_order_intent(self, intent: OrderIntent) -> Optional[int]:
+        raise NotImplementedError
+
+    async def update_order_intent(self, intent: OrderIntent) -> bool:
+        raise NotImplementedError
+
+    async def get_order_intent(self, idempotency_key: str) -> Optional[OrderIntent]:
+        raise NotImplementedError
+
+    async def list_open_order_intents(self, mode: Mode, run_id: str) -> List[OrderIntent]:
+        raise NotImplementedError
+
+    async def create_order_intent_event(self, event: OrderIntentEvent) -> Optional[int]:
+        raise NotImplementedError
+
+    async def create_order_fill(self, fill: OrderFill) -> Optional[int]:
         raise NotImplementedError
 
     async def get_trades(
@@ -273,6 +355,53 @@ class PostgresBackend(DatabaseBackend):
                     mode TEXT NOT NULL, run_id TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(symbol, mode, run_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS order_intents (
+                    id SERIAL PRIMARY KEY,
+                    idempotency_key TEXT UNIQUE NOT NULL,
+                    client_id TEXT UNIQUE NOT NULL,
+                    order_id TEXT,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    order_type TEXT NOT NULL,
+                    quantity DOUBLE PRECISION NOT NULL,
+                    price DOUBLE PRECISION,
+                    stop_price DOUBLE PRECISION,
+                    reduce_only BOOLEAN NOT NULL DEFAULT FALSE,
+                    status TEXT NOT NULL,
+                    filled_qty DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    avg_fill_price DOUBLE PRECISION,
+                    last_error TEXT,
+                    mode TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_order_intents_status ON order_intents(status);
+                CREATE INDEX IF NOT EXISTS idx_order_intents_symbol ON order_intents(symbol);
+
+                CREATE TABLE IF NOT EXISTS order_intent_events (
+                    id SERIAL PRIMARY KEY,
+                    idempotency_key TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    details TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_order_intent_events_key ON order_intent_events(idempotency_key);
+
+                CREATE TABLE IF NOT EXISTS order_fills (
+                    id SERIAL PRIMARY KEY,
+                    idempotency_key TEXT NOT NULL,
+                    trade_id TEXT UNIQUE NOT NULL,
+                    order_id TEXT,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    quantity DOUBLE PRECISION NOT NULL,
+                    price DOUBLE PRECISION NOT NULL,
+                    fee DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_order_fills_key ON order_fills(idempotency_key);
             """)
 
     async def close(self) -> None:
@@ -354,7 +483,6 @@ class PostgresBackend(DatabaseBackend):
             funding=excluded.funding, realized_pnl=excluded.realized_pnl, mark_price=excluded.mark_price, slippage_bps=excluded.slippage_bps,
             achieved_vs_signal_bps=excluded.achieved_vs_signal_bps, latency_ms=excluded.latency_ms, maker=excluded.maker, timestamp=excluded.timestamp
             RETURNING id
-            RETURNING id
         """
         _log_query(query, (trade.client_id, trade.trade_id, trade.order_id, trade.run_id, trade.mode, trade.symbol, trade.side, trade.quantity, trade.price, trade.commission, trade.fees, trade.funding, trade.realized_pnl, trade.mark_price, trade.slippage_bps, trade.achieved_vs_signal_bps, trade.latency_ms, trade.maker, trade.timestamp or datetime.now(timezone.utc)))
         async with self.pool.acquire() as conn:
@@ -379,6 +507,134 @@ class PostgresBackend(DatabaseBackend):
                 trade.latency_ms,
                 trade.maker,
                 trade.timestamp or datetime.now(timezone.utc),
+            )
+
+    async def create_order_intent(self, intent: OrderIntent) -> Optional[int]:
+        if not self.pool:
+            return None
+        query = """
+            INSERT INTO order_intents (
+                idempotency_key, client_id, order_id, symbol, side, order_type,
+                quantity, price, stop_price, reduce_only, status, filled_qty,
+                avg_fill_price, last_error, mode, run_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            ON CONFLICT(idempotency_key) DO UPDATE SET
+                order_id=excluded.order_id,
+                quantity=excluded.quantity,
+                price=excluded.price,
+                stop_price=excluded.stop_price,
+                reduce_only=excluded.reduce_only,
+                status=excluded.status,
+                filled_qty=excluded.filled_qty,
+                avg_fill_price=excluded.avg_fill_price,
+                last_error=excluded.last_error,
+                updated_at=CURRENT_TIMESTAMP
+            RETURNING id
+        """
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                query,
+                intent.idempotency_key,
+                intent.client_id,
+                intent.order_id,
+                intent.symbol,
+                intent.side,
+                intent.order_type,
+                intent.quantity,
+                intent.price,
+                intent.stop_price,
+                intent.reduce_only,
+                intent.status,
+                intent.filled_qty,
+                intent.avg_fill_price,
+                intent.last_error,
+                intent.mode,
+                intent.run_id,
+            )
+
+    async def update_order_intent(self, intent: OrderIntent) -> bool:
+        if not self.pool:
+            return False
+        query = """
+            UPDATE order_intents
+            SET order_id = $1,
+                status = $2,
+                filled_qty = $3,
+                avg_fill_price = $4,
+                last_error = $5,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE idempotency_key = $6
+        """
+        async with self.pool.acquire() as conn:
+            res = await conn.execute(
+                query,
+                intent.order_id,
+                intent.status,
+                intent.filled_qty,
+                intent.avg_fill_price,
+                intent.last_error,
+                intent.idempotency_key,
+            )
+            return int(res.split(" ")[-1]) > 0
+
+    async def get_order_intent(self, idempotency_key: str) -> Optional[OrderIntent]:
+        if not self.pool:
+            return None
+        query = "SELECT * FROM order_intents WHERE idempotency_key = $1"
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, idempotency_key)
+            return OrderIntent(**row) if row else None
+
+    async def list_open_order_intents(self, mode: Mode, run_id: str) -> List[OrderIntent]:
+        if not self.pool:
+            return []
+        query = """
+            SELECT * FROM order_intents
+            WHERE mode = $1 AND run_id = $2
+            AND status NOT IN ('filled', 'canceled', 'failed')
+            ORDER BY created_at DESC
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, mode, run_id)
+            return [OrderIntent(**row) for row in rows]
+
+    async def create_order_intent_event(self, event: OrderIntentEvent) -> Optional[int]:
+        if not self.pool:
+            return None
+        query = """
+            INSERT INTO order_intent_events (idempotency_key, status, details)
+            VALUES ($1, $2, $3)
+            RETURNING id
+        """
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                query, event.idempotency_key, event.status, event.details
+            )
+
+    async def create_order_fill(self, fill: OrderFill) -> Optional[int]:
+        if not self.pool:
+            return None
+        query = """
+            INSERT INTO order_fills (
+                idempotency_key, trade_id, order_id, symbol, side, quantity, price, fee, timestamp
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT(trade_id) DO NOTHING
+            RETURNING id
+        """
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                query,
+                fill.idempotency_key,
+                fill.trade_id,
+                fill.order_id,
+                fill.symbol,
+                fill.side,
+                fill.quantity,
+                fill.price,
+                fill.fee,
+                fill.timestamp or datetime.now(timezone.utc),
             )
 
     async def get_trades(
@@ -509,6 +765,53 @@ class SQLiteBackend(DatabaseBackend):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(symbol, mode, run_id)
             );
+
+            CREATE TABLE IF NOT EXISTS order_intents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idempotency_key TEXT UNIQUE NOT NULL,
+                client_id TEXT UNIQUE NOT NULL,
+                order_id TEXT,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                order_type TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                price REAL,
+                stop_price REAL,
+                reduce_only INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                filled_qty REAL NOT NULL DEFAULT 0,
+                avg_fill_price REAL,
+                last_error TEXT,
+                mode TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_order_intents_status ON order_intents(status);
+            CREATE INDEX IF NOT EXISTS idx_order_intents_symbol ON order_intents(symbol);
+
+            CREATE TABLE IF NOT EXISTS order_intent_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idempotency_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_order_intent_events_key ON order_intent_events(idempotency_key);
+
+            CREATE TABLE IF NOT EXISTS order_fills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idempotency_key TEXT NOT NULL,
+                trade_id TEXT UNIQUE NOT NULL,
+                order_id TEXT,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                price REAL NOT NULL,
+                fee REAL NOT NULL DEFAULT 0,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_order_fills_key ON order_fills(idempotency_key);
         """)
 
     async def close(self) -> None:
@@ -657,6 +960,150 @@ class SQLiteBackend(DatabaseBackend):
             rows = await cursor.fetchall()
             return [Trade(**dict(row)) for row in rows]
 
+    async def create_order_intent(self, intent: OrderIntent) -> Optional[int]:
+        if not self.conn:
+            return None
+        query = """
+            INSERT INTO order_intents (
+                idempotency_key, client_id, order_id, symbol, side, order_type,
+                quantity, price, stop_price, reduce_only, status, filled_qty,
+                avg_fill_price, last_error, mode, run_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(idempotency_key) DO UPDATE SET
+                order_id=excluded.order_id,
+                quantity=excluded.quantity,
+                price=excluded.price,
+                stop_price=excluded.stop_price,
+                reduce_only=excluded.reduce_only,
+                status=excluded.status,
+                filled_qty=excluded.filled_qty,
+                avg_fill_price=excluded.avg_fill_price,
+                last_error=excluded.last_error,
+                updated_at=CURRENT_TIMESTAMP
+        """
+        try:
+            params = (
+                intent.idempotency_key,
+                intent.client_id,
+                intent.order_id,
+                intent.symbol,
+                intent.side,
+                intent.order_type,
+                intent.quantity,
+                intent.price,
+                intent.stop_price,
+                1 if intent.reduce_only else 0,
+                intent.status,
+                intent.filled_qty,
+                intent.avg_fill_price,
+                intent.last_error,
+                intent.mode,
+                intent.run_id,
+            )
+            cursor = await self.conn.execute(query, params)
+            await self.conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            logger.error("SQLite create_order_intent failed: %s", e)
+            return None
+
+    async def update_order_intent(self, intent: OrderIntent) -> bool:
+        if not self.conn:
+            return False
+        query = """
+            UPDATE order_intents
+            SET order_id = ?,
+                status = ?,
+                filled_qty = ?,
+                avg_fill_price = ?,
+                last_error = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE idempotency_key = ?
+        """
+        cursor = await self.conn.execute(
+            query,
+            (
+                intent.order_id,
+                intent.status,
+                intent.filled_qty,
+                intent.avg_fill_price,
+                intent.last_error,
+                intent.idempotency_key,
+            ),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def get_order_intent(self, idempotency_key: str) -> Optional[OrderIntent]:
+        if not self.conn:
+            return None
+        query = "SELECT * FROM order_intents WHERE idempotency_key = ?"
+        async with self.conn.execute(query, (idempotency_key,)) as cursor:
+            row = await cursor.fetchone()
+            return OrderIntent(**dict(row)) if row else None
+
+    async def list_open_order_intents(self, mode: Mode, run_id: str) -> List[OrderIntent]:
+        if not self.conn:
+            return []
+        query = """
+            SELECT * FROM order_intents
+            WHERE mode = ? AND run_id = ?
+            AND status NOT IN ('filled', 'canceled', 'failed')
+            ORDER BY created_at DESC
+        """
+        async with self.conn.execute(query, (mode, run_id)) as cursor:
+            rows = await cursor.fetchall()
+            return [OrderIntent(**dict(row)) for row in rows]
+
+    async def create_order_intent_event(self, event: OrderIntentEvent) -> Optional[int]:
+        if not self.conn:
+            return None
+        query = """
+            INSERT INTO order_intent_events (idempotency_key, status, details)
+            VALUES (?, ?, ?)
+        """
+        try:
+            cursor = await self.conn.execute(
+                query, (event.idempotency_key, event.status, event.details)
+            )
+            await self.conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            logger.error("SQLite create_order_intent_event failed: %s", e)
+            return None
+
+    async def create_order_fill(self, fill: OrderFill) -> Optional[int]:
+        if not self.conn:
+            return None
+        query = """
+            INSERT INTO order_fills (
+                idempotency_key, trade_id, order_id, symbol, side, quantity, price, fee, timestamp
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(trade_id) DO NOTHING
+        """
+        try:
+            cursor = await self.conn.execute(
+                query,
+                (
+                    fill.idempotency_key,
+                    fill.trade_id,
+                    fill.order_id,
+                    fill.symbol,
+                    fill.side,
+                    fill.quantity,
+                    fill.price,
+                    fill.fee,
+                    fill.timestamp or datetime.now(timezone.utc),
+                ),
+            )
+            await self.conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            logger.error("SQLite create_order_fill failed: %s", e)
+            return None
+
     async def update_position(self, position: Position) -> bool:
         if not self.conn:
             return False
@@ -791,3 +1238,33 @@ class DatabaseManager:
         if self.backend:
             return await self.backend.add_pnl_entry(entry)
         return True
+
+    async def create_order_intent(self, intent: OrderIntent) -> Optional[int]:
+        if self.backend:
+            return await self.backend.create_order_intent(intent)
+        return None
+
+    async def update_order_intent(self, intent: OrderIntent) -> bool:
+        if self.backend:
+            return await self.backend.update_order_intent(intent)
+        return False
+
+    async def get_order_intent(self, idempotency_key: str) -> Optional[OrderIntent]:
+        if self.backend:
+            return await self.backend.get_order_intent(idempotency_key)
+        return None
+
+    async def list_open_order_intents(self, mode: Mode, run_id: str) -> List[OrderIntent]:
+        if self.backend:
+            return await self.backend.list_open_order_intents(mode, run_id)
+        return []
+
+    async def create_order_intent_event(self, event: OrderIntentEvent) -> Optional[int]:
+        if self.backend:
+            return await self.backend.create_order_intent_event(event)
+        return None
+
+    async def create_order_fill(self, fill: OrderFill) -> Optional[int]:
+        if self.backend:
+            return await self.backend.create_order_fill(fill)
+        return None
