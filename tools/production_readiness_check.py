@@ -77,27 +77,27 @@ class ProductionReadinessChecker:
     def check_required_packages(self) -> bool:
         """Verify required Python packages are installed."""
         category = "Dependencies"
+        # Map of display name to import name
         required_packages = [
-            "fastapi",
-            "uvicorn",
-            "nats",
-            "pandas",
-            "numpy",
-            "pydantic",
-            "yaml",
-            "asyncio",
-            "aiohttp",
-            "pytest",
+            ("fastapi", "fastapi"),
+            ("uvicorn", "uvicorn"),
+            ("nats-py", "nats"),
+            ("pandas", "pandas"),
+            ("numpy", "numpy"),
+            ("pydantic", "pydantic"),
+            ("PyYAML", "yaml"),
+            ("aiohttp", "aiohttp"),
+            ("pytest", "pytest"),
         ]
 
         all_passed = True
-        for package in required_packages:
+        for package_name, import_name in required_packages:
             try:
-                __import__(package.replace("-", "_"))
-                self.add_check(category, f"Package: {package}", True, "Installed")
+                __import__(import_name.replace("-", "_"))
+                self.add_check(category, f"Package: {package_name}", True, "Installed")
             except ImportError:
                 self.add_check(
-                    category, f"Package: {package}", False, f"{package} not installed"
+                    category, f"Package: {package_name}", False, f"{package_name} not installed"
                 )
                 all_passed = False
 
