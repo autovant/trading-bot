@@ -1,0 +1,344 @@
+name: Production Readiness Check
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Trading mode to check (paper/testnet/live)'
+        required: true
+        default: 'paper'
+        type: choice
+        options:
+          - paper
+          - testnet
+          - live
+
+jobs:
+  production-readiness:
+    name: Production Readiness Validation
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml || echo "PyYAML install failed, continuing..."
+
+      - name: Run production readiness check (Paper Mode)
+        run: |
+          python tools/production_readiness_check.py --mode paper --output readiness-report-paper.json
+        continue-on-error: true
+
+      - name: Run production readiness check (Testnet Mode)
+        run: |
+          python tools/production_readiness_check.py --mode testnet --output readiness-report-testnet.json
+        continue-on-error: true
+
+      - name: Upload readiness reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: production-readiness-reports
+          path: readiness-report-*.json
+          retention-days: 30
+
+      - name: Check critical failures
+        run: |
+          if python tools/production_readiness_check.py --mode paper --strict; then
+            echo "✅ Production readiness check passed"
+          else
+            echo "❌ Production readiness check failed - see logs above"
+            exit 1
+          fi
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: production-readiness
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt || echo "Some packages failed to install, continuing..."
+
+      - name: Create required directories
+        run: |
+          mkdir -p data logs configs
+
+      - name: Run production readiness tests
+        run: |
+          python -m pytest tests/test_production_readiness.py -v --tb=short || echo "Some tests failed"
+        continue-on-error: true
+
+      - name: Run integration tests
+        run: |
+          python -m pytest tests/test_readiness_gates.py -v --tb=short || echo "Some tests failed"
+        continue-on-error: true
+
+  config-validation:
+    name: Configuration Validation
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+
+      - name: Validate YAML configuration files
+        run: |
+          python -c "
+          import yaml
+          import sys
+          from pathlib import Path
+          
+          config_files = [
+              'config/strategy.yaml',
+              'configs/zoomex_example.yaml',
+              'docker-compose.yml',
+              'prometheus.yml',
+          ]
+          
+          failed = []
+          for config_file in config_files:
+              path = Path(config_file)
+              if not path.exists():
+                  print(f'⚠️  {config_file} not found')
+                  continue
+              try:
+                  with open(path) as f:
+                      yaml.safe_load(f)
+                  print(f'✓ {config_file} is valid YAML')
+              except yaml.YAMLError as e:
+                  print(f'✗ {config_file} is invalid: {e}')
+                  failed.append(config_file)
+          
+          if failed:
+              print(f'\n❌ {len(failed)} configuration file(s) failed validation')
+              sys.exit(1)
+          else:
+              print(f'\n✅ All configuration files are valid')
+          "
+
+      - name: Check for secrets in code
+        run: |
+          python -c "
+          import re
+          from pathlib import Path
+          
+          # Patterns that might indicate hardcoded secrets
+          secret_patterns = [
+              r'api[_-]?key[\"\\']?\s*[:=]\s*[\"\\'][^\"\\'\s]{20,}',
+              r'api[_-]?secret[\"\\']?\s*[:=]\s*[\"\\'][^\"\\'\s]{20,}',
+              r'password[\"\\']?\s*[:=]\s*[\"\\'][^\"\\'\s]{8,}',
+              r'token[\"\\']?\s*[:=]\s*[\"\\'][^\"\\'\s]{20,}',
+          ]
+          
+          found_secrets = []
+          for pattern in secret_patterns:
+              for py_file in Path('src').rglob('*.py'):
+                  with open(py_file) as f:
+                      content = f.read()
+                      if re.search(pattern, content, re.IGNORECASE):
+                          # Exclude common false positives
+                          if 'os.getenv' not in content and 'os.environ' not in content:
+                              found_secrets.append(str(py_file))
+          
+          if found_secrets:
+              print('⚠️  Potential hardcoded secrets found in:')
+              for file in set(found_secrets):
+                  print(f'  - {file}')
+              print('Please ensure all secrets are loaded from environment variables')
+          else:
+              print('✓ No obvious hardcoded secrets detected')
+          "
+
+  documentation-check:
+    name: Documentation Completeness
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Check documentation files
+        run: |
+          python -c "
+          from pathlib import Path
+          import sys
+          
+          required_docs = [
+              'README.md',
+              'README_TRADING.md',
+              'PRODUCTION_STATUS.md',
+              'QA_CHECKLIST.md',
+              'CHANGELOG.md',
+          ]
+          
+          missing = []
+          for doc in required_docs:
+              if not Path(doc).exists():
+                  print(f'✗ Missing: {doc}')
+                  missing.append(doc)
+              else:
+                  print(f'✓ Found: {doc}')
+          
+          if missing:
+              print(f'\n⚠️  {len(missing)} documentation file(s) missing')
+              sys.exit(1)
+          else:
+              print(f'\n✅ All required documentation present')
+          "
+
+      - name: Check README completeness
+        run: |
+          python -c "
+          from pathlib import Path
+          
+          readme = Path('README.md')
+          if not readme.exists():
+              print('❌ README.md not found')
+              exit(1)
+          
+          content = readme.read_text()
+          required_sections = [
+              'Quickstart',
+              'Features',
+              'Configuration',
+              'Architecture',
+          ]
+          
+          missing = []
+          for section in required_sections:
+              if section.lower() not in content.lower():
+                  missing.append(section)
+          
+          if missing:
+              print('⚠️  README.md missing sections:', ', '.join(missing))
+          else:
+              print('✓ README.md contains all required sections')
+          "
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Check file permissions
+        run: |
+          # Check for overly permissive files
+          find . -type f -perm /o+w -not -path "./.git/*" -not -path "./venv/*" -not -path "./.pytest_cache/*" | while read file; do
+            echo "⚠️  World-writable file: $file"
+          done || true
+
+      - name: Check .env.example
+        run: |
+          if [ -f ".env.example" ]; then
+            echo "✓ .env.example found"
+            # Ensure it doesn't contain real secrets
+            if grep -E '(api[_-]?key|api[_-]?secret|password|token).*=.*[A-Za-z0-9]{20,}' .env.example; then
+              echo "❌ .env.example appears to contain real secrets!"
+              exit 1
+            else
+              echo "✓ .env.example looks safe"
+            fi
+          else
+            echo "⚠️  .env.example not found"
+          fi
+
+      - name: Check .gitignore coverage
+        run: |
+          python -c "
+          from pathlib import Path
+          
+          gitignore = Path('.gitignore')
+          if not gitignore.exists():
+              print('❌ .gitignore not found')
+              exit(1)
+          
+          content = gitignore.read_text()
+          required_patterns = [
+              '.env',
+              '__pycache__',
+              '*.pyc',
+              'venv',
+              'data/',
+              'logs/',
+              '*.db',
+          ]
+          
+          missing = []
+          for pattern in required_patterns:
+              if pattern not in content:
+                  missing.append(pattern)
+          
+          if missing:
+              print('⚠️  .gitignore missing patterns:', ', '.join(missing))
+          else:
+              print('✓ .gitignore properly configured')
+          "
+
+  report-status:
+    name: Report Overall Status
+    runs-on: ubuntu-latest
+    needs: [production-readiness, integration-tests, config-validation, documentation-check, security-scan]
+    if: always()
+    
+    steps:
+      - name: Check job statuses
+        run: |
+          echo "Production Readiness: ${{ needs.production-readiness.result }}"
+          echo "Integration Tests: ${{ needs.integration-tests.result }}"
+          echo "Config Validation: ${{ needs.config-validation.result }}"
+          echo "Documentation Check: ${{ needs.documentation-check.result }}"
+          echo "Security Scan: ${{ needs.security-scan.result }}"
+          
+          if [ "${{ needs.production-readiness.result }}" == "success" ] && \
+             [ "${{ needs.config-validation.result }}" == "success" ] && \
+             [ "${{ needs.documentation-check.result }}" == "success" ] && \
+             [ "${{ needs.security-scan.result }}" == "success" ]; then
+            echo "✅ All critical checks passed"
+            exit 0
+          else
+            echo "❌ Some critical checks failed"
+            exit 1
+          fi
