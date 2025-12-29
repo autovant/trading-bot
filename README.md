@@ -12,6 +12,7 @@ A production-ready cryptocurrency trading bot with advanced strategy implementat
 - **Docker Support**: Containerized deployment with docker-compose
 - **FastAPI Microservices**: Python-based execution, feed, risk, replay, reporter, and ops API services connected via NATS
 - **Real-time Communication**: Publish-subscribe messaging for market data and trading signals
+- **Production Readiness**: Comprehensive validation tools and automated CI/CD checks
 
 ## Quickstart
 
@@ -171,6 +172,45 @@ pytest tests/test_zoomex_client.py
 - `src/services/` - FastAPI microservices (execution, feed, risk, reporter, replay)
 - `dashboard/app.py` - Streamlit monitoring interface
 - `tools/backtest.py` - Historical backtesting engine
+- `tools/production_readiness_check.py` - Production readiness validation tool
+
+## Production Readiness
+
+The bot includes comprehensive production readiness validation tools:
+
+### Quick Check
+```bash
+# Using Make
+make readiness-check
+
+# Or directly
+python tools/production_readiness_check.py --mode paper
+```
+
+### Full Validation
+```bash
+# Generate detailed report
+make readiness-report
+
+# Run production tests
+make test-production
+
+# Pre-deployment checks
+make pre-deploy
+```
+
+### Documentation
+- **Full Guide**: `tools/README_PRODUCTION_READINESS.md`
+- **Quick Reference**: `PRODUCTION_READINESS_QUICK_REF.md`
+- **Current Status**: `PRODUCTION_STATUS.md`
+
+### CI/CD Integration
+The `.github/workflows/production-readiness.yml` workflow automatically validates:
+- Configuration files
+- Security (secrets, permissions)
+- Test coverage
+- Documentation completeness
+- Docker configuration
 
 ## License
 
