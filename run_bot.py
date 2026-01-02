@@ -32,6 +32,11 @@ from src.config import PerpsConfig, TradingBotConfig, get_config
 from src.database import DatabaseManager
 from src.exchanges.zoomex_v3 import ZoomexV3Client
 from src.risk.risk_manager import RiskManager
+from src.security.mode_guard import (
+    require_credentials,
+    resolve_zoomex_credentials,
+    validate_mode_config,
+)
 from src.services.perps import PerpsService
 from src.state.daily_pnl_store import DailyPnlStore
 from src.state.symbol_health_store import SymbolHealthStore, _format_iso
@@ -315,6 +320,7 @@ class TradingBot:
         self.runtime_health_stop_event: Optional[threading.Event] = None
         self.runtime_health_thread: Optional[threading.Thread] = None
         self.database: Optional[DatabaseManager] = None
+        self.zoomex_credentials: Optional[Tuple[str, str]] = None
 
     def _require_config(self) -> TradingBotConfig:
         if self.config is None:
@@ -348,11 +354,18 @@ class TradingBot:
         await self.database.initialize()
 
         if hasattr(self.config, "perps") and self.config.perps.enabled:
+            api_key, api_secret = self.zoomex_credentials or resolve_zoomex_credentials(
+                use_testnet=self.config.perps.useTestnet
+            )
+            label = (
+                "Zoomex testnet" if self.config.perps.useTestnet else "Zoomex live"
+            )
+            require_credentials(label, api_key, api_secret)
             exchange = ZoomexV3Client(
                 self.session,
-                base_url=self.config.exchange.base_url,
-                api_key=self.config.exchange.api_key,
-                api_secret=self.config.exchange.secret_key,
+                base_url=self.config.exchange.base_url or os.getenv("ZOOMEX_BASE"),
+                api_key=api_key,
+                api_secret=api_secret,
                 mode_name=self.mode,
                 max_requests_per_second=self.config.perps.maxRequestsPerSecond,
                 max_requests_per_minute=self.config.perps.maxRequestsPerMinute,
@@ -660,14 +673,11 @@ class TradingBot:
             logger.info("  - All signals and decisions will be logged")
         elif self.mode == "testnet":
             if hasattr(self.config, "exchange") and not self.config.exchange.testnet:
-                logger.warning(
+                raise ValueError(
                     "Mode is 'testnet' but exchange config has testnet=false"
                 )
-                self.config.exchange.testnet = True
             if not self.config.perps.useTestnet:
-                logger.warning("Mode is 'testnet' but config has useTestnet=false")
-                logger.warning("Forcing useTestnet=true for safety")
-                self.config.perps.useTestnet = True
+                raise ValueError("Mode is 'testnet' but config has useTestnet=false")
             logger.info("Running in TESTNET mode (real orders, fake money)")
             logger.info("  - Orders will be placed on testnet")
             logger.info("  - Using testnet API keys")
@@ -695,13 +705,20 @@ class TradingBot:
             if response != "I UNDERSTAND THE RISKS":
                 logger.error("Live trading cancelled by user")
                 sys.exit(0)
+        base_url = self.config.exchange.base_url or os.getenv("ZOOMEX_BASE")
+        validate_mode_config(
+            mode_name=self.mode,
+            exchange_testnet=self.config.exchange.testnet,
+            perps_testnet=self.config.perps.useTestnet,
+            exchange_base_url=base_url,
+        )
 
-        api_key = os.getenv("ZOOMEX_API_KEY")
-        api_secret = os.getenv("ZOOMEX_API_SECRET")
-        if not api_key or not api_secret:
-            raise ValueError(
-                "ZOOMEX_API_KEY and ZOOMEX_API_SECRET environment variables must be set"
-            )
+        api_key, api_secret = resolve_zoomex_credentials(
+            use_testnet=self.config.perps.useTestnet
+        )
+        label = "Zoomex testnet" if self.config.perps.useTestnet else "Zoomex live"
+        require_credentials(label, api_key, api_secret)
+        self.zoomex_credentials = (api_key, api_secret)
 
         logger.info(f"Symbol: {self.config.perps.symbol}")
         logger.info(f"Interval: {self.config.perps.interval}m")

@@ -104,6 +104,13 @@ class ExecutionEngine:
             )
             return None
 
+        if not idempotency_key:
+            logger.error(
+                "SAFETY_IDEMPOTENCY: Missing idempotency key for %s; refusing submit",
+                symbol,
+            )
+            return None
+
         intent = await self._ensure_intent(
             symbol=symbol,
             side=side,
@@ -195,8 +202,13 @@ class ExecutionEngine:
                 logger.info(f"Position size is zero, skipping {symbol}")
                 return
 
-            client_id = self._generate_client_id(symbol)
             side = self._direction_to_side(signal.direction)
+            if signal.timestamp is None:
+                logger.error(
+                    "SAFETY_IDEMPOTENCY: Missing signal timestamp for %s; refusing submit",
+                    symbol,
+                )
+                return
             idempotency_key = self._build_idempotency_key(
                 symbol=symbol,
                 side=side,
@@ -263,7 +275,12 @@ class ExecutionEngine:
                     signal.entry_price,
                 )
                 await self.set_stop_losses(
-                    symbol, side, signal, position_size, current_equity
+                    symbol,
+                    side,
+                    signal,
+                    position_size,
+                    current_equity,
+                    parent_intent_key=idempotency_key,
                 )
 
                 # We can't update positions here directly as that's state management.
@@ -400,16 +417,13 @@ class ExecutionEngine:
         client_id: Optional[str],
         idempotency_key: Optional[str],
     ) -> Optional[OrderIntent]:
-        intent_key = idempotency_key or self._build_idempotency_key(
-            symbol=symbol,
-            side=side,
-            order_type=order_type,
-            quantity=quantity,
-            price=price,
-            stop_price=stop_price,
-            reduce_only=reduce_only,
-            intent_timestamp=None,
-        )
+        if not idempotency_key:
+            logger.error(
+                "SAFETY_IDEMPOTENCY: Missing idempotency key for %s; refusing intent",
+                symbol,
+            )
+            return None
+        intent_key = idempotency_key
         derived_client_id = client_id or OrderIntentLedger.client_id_from_key(
             intent_key, self.run_id
         )
@@ -461,6 +475,70 @@ class ExecutionEngine:
         if hasattr(self.exchange, "get_recent_trades"):
             return await self.exchange.get_recent_trades()
         return []
+
+    async def set_stop_losses(
+        self,
+        symbol: str,
+        side: Side,
+        signal: TradingSignal,
+        position_size: float,
+        current_equity: float,
+        *,
+        parent_intent_key: str,
+    ):
+        """Set dual stop loss system."""
+        try:
+            # maximize allowable loss based on config hard risk %
+            max_loss = (
+                current_equity * self.config.risk_management.stops.hard_risk_percent
+            )
+
+            hard_stop_price = signal.entry_price
+            if side == "buy":
+                # For long, price going down is loss
+                # Loss = (Entry - Stop) * Size = Max_Loss
+                # Entry - Stop = Max_Loss / Size
+                # Stop = Entry - (Max_Loss / Size)
+                hard_stop_price -= max_loss / position_size
+            else:
+                # For short, price going up is loss
+                # Loss = (Stop - Entry) * Size
+                # Stop - Entry = Max_Loss / Size
+                # Stop = Entry + (Max_Loss / Size)
+                hard_stop_price += max_loss / position_size
+
+            stop_payload = {
+                "symbol": symbol,
+                "side": "sell" if side == "buy" else "buy",
+                "order_type": "stop_market",
+                "quantity": round(position_size, 8),
+                "stop_price": round(hard_stop_price, 8),
+                "reduce_only": True,
+            }
+            stop_key = OrderIntentLedger.build_child_idempotency_key(
+                parent_intent_key, "stop_loss", stop_payload
+            )
+            stop_client_id = OrderIntentLedger.client_id_from_key(
+                stop_key, self.run_id
+            )
+
+            # Place hard stop order
+            stop_order = await self.place_order_directly(
+                symbol=symbol,
+                side="sell" if side == "buy" else "buy",
+                order_type="stop_market",
+                quantity=position_size,
+                stop_price=hard_stop_price,
+                reduce_only=True,
+                client_id=stop_client_id,
+                idempotency_key=stop_key,
+            )
+
+            if stop_order:
+                logger.info(f"Set hard stop for {symbol} at {hard_stop_price:.2f}")
+
+        except Exception as e:
+            logger.error(f"Error setting stops for {symbol}: {e}")
 
 
 def _is_ambiguous_submit_error(exc: Exception) -> bool:
@@ -596,49 +674,3 @@ def _extract_trade_time(trade: Any) -> Optional[datetime]:
             return datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
         return None
     return getattr(trade, "timestamp", None)
-
-    async def set_stop_losses(
-        self,
-        symbol: str,
-        side: Side,
-        signal: TradingSignal,
-        position_size: float,
-        current_equity: float,
-    ):
-        """Set dual stop loss system."""
-        try:
-            # maximize allowable loss based on config hard risk %
-            max_loss = (
-                current_equity * self.config.risk_management.stops.hard_risk_percent
-            )
-
-            hard_stop_price = signal.entry_price
-            if side == "buy":
-                # For long, price going down is loss
-                # Loss = (Entry - Stop) * Size = Max_Loss
-                # Entry - Stop = Max_Loss / Size
-                # Stop = Entry - (Max_Loss / Size)
-                hard_stop_price -= max_loss / position_size
-            else:
-                # For short, price going up is loss
-                # Loss = (Stop - Entry) * Size
-                # Stop - Entry = Max_Loss / Size
-                # Stop = Entry + (Max_Loss / Size)
-                hard_stop_price += max_loss / position_size
-
-            # Place hard stop order
-            stop_order = await self.place_order_directly(
-                symbol=symbol,
-                side="sell" if side == "buy" else "buy",
-                order_type="stop_market",
-                quantity=position_size,
-                stop_price=hard_stop_price,
-                reduce_only=True,
-                client_id=self._generate_client_id(symbol),
-            )
-
-            if stop_order:
-                logger.info(f"Set hard stop for {symbol} at {hard_stop_price:.2f}")
-
-        except Exception as e:
-            logger.error(f"Error setting stops for {symbol}: {e}")

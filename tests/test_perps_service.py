@@ -179,7 +179,12 @@ async def test_risk_manager_blocks_order_submission():
     service.equity_usdt = 1000.0
     risk_manager.update_equity(1000.0)
 
-    await service._enter_long(100.0, stop_loss_pct=0.01, risk_pct=0.005)
+    await service._enter_long(
+        100.0,
+        stop_loss_pct=0.01,
+        risk_pct=0.005,
+        entry_bar_time=datetime.now(timezone.utc),
+    )
 
     assert client.create_market_with_brackets.await_count == 0
     assert risk_manager.total_open_risk == 0

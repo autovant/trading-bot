@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -85,9 +86,10 @@ def config():
 
 
 @pytest.fixture
-def execution_engine(config):
+async def execution_engine(config):
     exchange = MockExchange()
-    database = AsyncMock(spec=DatabaseManager)
+    database = DatabaseManager("sqlite:///:memory:")
+    await database.initialize()
     messaging = AsyncMock(spec=MessagingClient)
     position_manager = MagicMock(spec=PositionManager)
     risk_manager = MagicMock(spec=RiskManager)
@@ -98,7 +100,7 @@ def execution_engine(config):
     # Configure RiskManager
     risk_manager.crisis_mode = False
 
-    return ExecutionEngine(
+    engine = ExecutionEngine(
         config=config,
         exchange=exchange,
         database=database,
@@ -108,6 +110,10 @@ def execution_engine(config):
         run_id="test_run",
         mode="paper",
     )
+    try:
+        yield engine
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio
@@ -120,6 +126,7 @@ async def test_execute_signal_basic(execution_engine):
         entry_price=50000.0,
         stop_loss=49000.0,
         take_profit=52000.0,
+        timestamp=datetime.now(timezone.utc),
     )
     confidence = ConfidenceScore(
         regime_score=80,
@@ -181,6 +188,7 @@ async def test_execute_signal_zero_size(execution_engine):
         entry_price=50000.0,
         stop_loss=49000.0,
         take_profit=52000.0,
+        timestamp=datetime.now(timezone.utc),
     )
     confidence = ConfidenceScore(
         regime_score=80,
@@ -214,6 +222,7 @@ async def test_set_stop_losses(execution_engine):
         entry_price=50000.0,
         stop_loss=49000.0,
         take_profit=52000.0,
+        timestamp=datetime.now(timezone.utc),
     )
 
     with patch.object(execution_engine.exchange, "place_order") as mock_place_order:
@@ -223,6 +232,7 @@ async def test_set_stop_losses(execution_engine):
             signal=signal,
             position_size=0.1,
             current_equity=1000.0,
+            parent_intent_key="intent-test",
         )
 
         mock_place_order.assert_called_once()

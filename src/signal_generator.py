@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -150,6 +149,12 @@ class SignalGenerator:
             if ema_21.empty or rsi.empty:
                 return []
 
+            if "timestamp" in data.columns:
+                signal_time = pd.to_datetime(data["timestamp"].iloc[-1], utc=True)
+            else:
+                signal_time = pd.to_datetime(data.index[-1], utc=True)
+            signal_time = signal_time.to_pydatetime()
+
             # Current values
             current_price = float(data["close"].iloc[-1])
             current_ema21 = float(ema_21.iloc[-1])
@@ -175,7 +180,7 @@ class SignalGenerator:
                         entry_price=current_price,
                         stop_loss=current_price * 0.98,
                         take_profit=current_price * 1.04,
-                        timestamp=datetime.now(timezone.utc),
+                        timestamp=signal_time,
                     )
                 )
 
@@ -193,7 +198,7 @@ class SignalGenerator:
                         entry_price=current_price,
                         stop_loss=current_price * 1.02,
                         take_profit=current_price * 0.96,
-                        timestamp=datetime.now(timezone.utc),
+                        timestamp=signal_time,
                     )
                 )
 
@@ -208,7 +213,7 @@ class SignalGenerator:
                         entry_price=current_price,
                         stop_loss=current_low,
                         take_profit=current_price + 2 * (current_price - current_low),
-                        timestamp=datetime.now(timezone.utc),
+                        timestamp=signal_time,
                     )
                 )
 
@@ -222,7 +227,7 @@ class SignalGenerator:
                         entry_price=current_price,
                         stop_loss=current_high,
                         take_profit=current_price - 2 * (current_high - current_price),
-                        timestamp=datetime.now(timezone.utc),
+                        timestamp=signal_time,
                     )
                 )
 
@@ -237,7 +242,7 @@ class SignalGenerator:
                         entry_price=current_price,
                         stop_loss=current_price * 0.98,
                         take_profit=current_bb_middle,
-                        timestamp=datetime.now(timezone.utc),
+                        timestamp=signal_time,
                     )
                 )
             elif current_price >= current_bb_upper:
@@ -250,7 +255,7 @@ class SignalGenerator:
                         entry_price=current_price,
                         stop_loss=current_price * 1.02,
                         take_profit=current_bb_middle,
-                        timestamp=datetime.now(timezone.utc),
+                        timestamp=signal_time,
                     )
                 )
 
@@ -265,7 +270,7 @@ class SignalGenerator:
                         entry_price=current_price,
                         stop_loss=current_price * 0.98,
                         take_profit=current_price * 1.05,
-                        timestamp=datetime.now(timezone.utc),
+                        timestamp=signal_time,
                     )
                 )
             elif divergence.get("bearish"):
@@ -278,7 +283,7 @@ class SignalGenerator:
                         entry_price=current_price,
                         stop_loss=current_price * 1.02,
                         take_profit=current_price * 0.95,
-                        timestamp=datetime.now(timezone.utc),
+                        timestamp=signal_time,
                     )
                 )
 

@@ -26,6 +26,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.security.mode_guard import resolve_exchange_credentials
+
 APP_MODE = Literal["live", "paper", "replay", "backtest"]
 PRICE_SOURCE = Literal["live", "bars", "replay"]
 APP_MODE = Literal["live", "paper", "replay", "backtest"]
@@ -74,19 +76,11 @@ def _substitute_env_vars(data: Any) -> Any:
 def _assert_no_literal_secrets(raw_data: Dict[str, Any]) -> None:
     exchange_cfg = raw_data.get("exchange") or {}
     for key in ("api_key", "secret_key", "passphrase"):
-        value = exchange_cfg.get(key)
-        if value is None:
-            continue
-        if isinstance(value, str):
-            stripped = value.strip()
-            if not stripped:
-                continue
-            if stripped.startswith("${") and stripped.endswith("}"):
-                continue
-        raise ValueError(
-            f"Secrets must not be stored in config files (exchange.{key}). "
-            "Use environment variables instead."
-        )
+        if key in exchange_cfg:
+            raise ValueError(
+                f"Secrets must not be stored in config files (exchange.{key}). "
+                "Use environment variables instead."
+            )
 
 
 class StrictModel(BaseModel):
@@ -574,6 +568,8 @@ class TradingBotConfig(BaseSettings):
                 )
             if self.exchange.testnet:
                 raise ValueError("Live mode cannot use testnet exchange endpoints.")
+            if self.exchange.base_url and "testnet" in self.exchange.base_url.lower():
+                raise ValueError("Live mode cannot use a testnet exchange base URL.")
             if self.perps.useTestnet:
                 raise ValueError("Live mode cannot use testnet perps endpoints.")
         return self
@@ -607,6 +603,11 @@ def load_config(config_path: Optional[str] = None) -> TradingBotConfig:
     _assert_no_literal_secrets(raw_data)
 
     config_data = _substitute_env_vars(raw_data)
+    exchange_cfg = config_data.get("exchange") or {}
+    exchange_cfg.update(
+        resolve_exchange_credentials(testnet=bool(exchange_cfg.get("testnet", True)))
+    )
+    config_data["exchange"] = exchange_cfg
 
     config_data["config_paths"] = {
         "strategy": str(strategy_path),

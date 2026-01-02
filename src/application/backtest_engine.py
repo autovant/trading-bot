@@ -2,7 +2,7 @@ import asyncio
 import logging
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -39,6 +39,14 @@ class BacktestConfig(BaseModel):
     initial_capital: float = Field(default=100_000.0, gt=0)
     slippage: float = Field(default=0.0003, ge=0.0)
     fee: float = Field(default=0.0004, ge=0.0)
+    spread_bps: float = Field(default=2.0, ge=0.0)
+    latency_ms: int = Field(default=0, ge=0)
+    funding_rate: float = Field(default=0.0)
+    funding_interval_hours: int = Field(default=8, ge=1)
+    maintenance_margin_pct: float = Field(default=0.005, ge=0.0)
+    partial_fill_enabled: bool = True
+    partial_fill_min_slice_pct: float = Field(default=0.2, ge=0.0, le=1.0)
+    partial_fill_max_slices: int = Field(default=4, ge=1)
     risk_free_rate: float = 0.02  # annual
     mode: str = "event"  # "event" | "vectorized"
 
@@ -63,84 +71,109 @@ class BacktestResult(BaseModel):
 class BacktestExecutionEngine(IExecutionEngine):
     """Simulated execution engine for backtesting."""
 
-    def __init__(self, initial_capital: float, slippage: float, fee: float):
+    def __init__(
+        self,
+        initial_capital: float,
+        slippage: float,
+        fee: float,
+        *,
+        spread_bps: float,
+        latency_ms: int,
+        funding_rate: float,
+        funding_interval_hours: int,
+        maintenance_margin_pct: float,
+        partial_fill_enabled: bool,
+        partial_fill_min_slice_pct: float,
+        partial_fill_max_slices: int,
+    ):
         self.initial_capital = initial_capital
         self.cash = initial_capital
         self.slippage = slippage
         self.fee = fee
+        self.spread_bps = spread_bps
+        self.latency_ms = latency_ms
+        self.funding_rate = funding_rate
+        self.funding_interval_hours = funding_interval_hours
+        self.maintenance_margin_pct = maintenance_margin_pct
+        self.partial_fill_enabled = partial_fill_enabled
+        self.partial_fill_min_slice_pct = partial_fill_min_slice_pct
+        self.partial_fill_max_slices = partial_fill_max_slices
         self.positions: Dict[str, Position] = {}
         self.trades: List[Trade] = []
         self.orders: Dict[str, Order] = {}
         self.equity_curve: List[Tuple[datetime, float]] = []
         self.trade_pnls: List[float] = []
         self.current_time: datetime = datetime.now(timezone.utc)
+        self._last_funding_time: Optional[datetime] = None
 
     async def submit_order(self, order: Order) -> Order:
         price = order.price or order.metadata.get("tick_price")
         if price is None:
             raise ValueError("Order missing price for backtest fill")
 
-        fill_price = self._apply_slippage(float(price), order.side)
-        fee_cost = fill_price * order.quantity * self.fee
-        self.cash -= fee_cost
+        fill_price = self._apply_fill_price(float(price), order.side)
+        slices = self._split_quantity(order.quantity)
+        for idx, slice_qty in enumerate(slices):
+            fee_cost = fill_price * slice_qty * self.fee
+            self.cash -= fee_cost
 
-        if order.side == Side.BUY:
-            self.cash -= fill_price * order.quantity
-        else:
-            self.cash += fill_price * order.quantity
+            if order.side == Side.BUY:
+                self.cash -= fill_price * slice_qty
+            else:
+                self.cash += fill_price * slice_qty
 
-        trade = Trade(
-            id=str(uuid.uuid4()),
-            order_id=order.id,
-            symbol=order.symbol,
-            side=order.side,
-            quantity=order.quantity,
-            price=fill_price,
-            commission=fee_cost,
-            timestamp=self.current_time,
-        )
-        self.trades.append(trade)
-        self.orders[order.id] = order
-
-        existing = self.positions.get(order.symbol)
-        if existing is None:
-            self.positions[order.symbol] = Position(
+            trade = Trade(
+                id=str(uuid.uuid4()),
+                order_id=order.id,
                 symbol=order.symbol,
                 side=order.side,
-                quantity=order.quantity,
-                entry_price=fill_price,
-                current_price=fill_price,
+                quantity=slice_qty,
+                price=fill_price,
+                commission=fee_cost,
+                timestamp=self._fill_timestamp(idx),
             )
-        else:
-            if existing.side == order.side:
-                new_qty = existing.quantity + order.quantity
-                weighted_entry = (
-                    existing.entry_price * existing.quantity
-                    + fill_price * order.quantity
-                ) / new_qty
-                existing.entry_price = weighted_entry
-                existing.quantity = new_qty
-                existing.current_price = fill_price
-            else:
-                close_qty = min(existing.quantity, order.quantity)
-                realized = self._realized_pnl(
-                    existing.side, existing.entry_price, fill_price, close_qty
+            self.trades.append(trade)
+            self.orders[order.id] = order
+
+            existing = self.positions.get(order.symbol)
+            if existing is None:
+                self.positions[order.symbol] = Position(
+                    symbol=order.symbol,
+                    side=order.side,
+                    quantity=slice_qty,
+                    entry_price=fill_price,
+                    current_price=fill_price,
                 )
-                self.trade_pnls.append(realized)
-                existing.quantity -= close_qty
-
-                if existing.quantity <= 0:
-                    del self.positions[order.symbol]
-
-                remaining = order.quantity - close_qty
-                if remaining > 0:
-                    self.positions[order.symbol] = Position(
-                        symbol=order.symbol,
-                        side=order.side,
-                        quantity=remaining,
-                        entry_price=fill_price,
-                        current_price=fill_price,
+            else:
+                if existing.side == order.side:
+                    new_qty = existing.quantity + slice_qty
+                    weighted_entry = (
+                        existing.entry_price * existing.quantity
+                        + fill_price * slice_qty
+                    ) / new_qty
+                    existing.entry_price = weighted_entry
+                    existing.quantity = new_qty
+                    existing.current_price = fill_price
+                else:
+                    close_qty = min(existing.quantity, slice_qty)
+                    realized = self._realized_pnl(
+                        existing.side, existing.entry_price, fill_price, close_qty
                     )
+                    self.trade_pnls.append(realized)
+                    existing.quantity -= close_qty
+
+                    if existing.quantity <= 0:
+                        del self.positions[order.symbol]
+
+                    remaining = slice_qty - close_qty
+                    if remaining > 0:
+                        self.positions[order.symbol] = Position(
+                            symbol=order.symbol,
+                            side=order.side,
+                            quantity=remaining,
+                            entry_price=fill_price,
+                            current_price=fill_price,
+                        )
 
         order.status = OrderStatus.FILLED
         return order
@@ -163,12 +196,100 @@ class BacktestExecutionEngine(IExecutionEngine):
                 (pos.current_price - pos.entry_price) * pos.quantity
             )
             equity += pos.unrealized_pnl
+        self._apply_funding(timestamp)
+        equity = self.cash + sum(
+            pos.unrealized_pnl for pos in self.positions.values()
+        )
+        equity = self._check_liquidation(equity, timestamp)
         self.equity_curve.append((timestamp, equity))
         self.current_time = timestamp
         return equity
 
+    def _apply_spread(self, price: float, side: Side) -> float:
+        if self.spread_bps <= 0:
+            return price
+        spread = price * (self.spread_bps / 10000)
+        return price + (spread / 2) if side == Side.BUY else price - (spread / 2)
+
     def _apply_slippage(self, price: float, side: Side) -> float:
         return price * (1 + self.slippage if side == Side.BUY else 1 - self.slippage)
+
+    def _apply_fill_price(self, price: float, side: Side) -> float:
+        return self._apply_slippage(self._apply_spread(price, side), side)
+
+    def _split_quantity(self, quantity: float) -> List[float]:
+        if not self.partial_fill_enabled or self.partial_fill_max_slices <= 1:
+            return [quantity]
+        max_slices = max(1, self.partial_fill_max_slices)
+        min_pct = max(self.partial_fill_min_slice_pct, 0.0001)
+        max_by_min = max(1, int(1 / min_pct))
+        slices = min(max_slices, max_by_min)
+        base_qty = quantity / slices
+        result = [base_qty for _ in range(slices)]
+        result[-1] = quantity - base_qty * (slices - 1)
+        return result
+
+    def _fill_timestamp(self, slice_index: int) -> datetime:
+        if self.latency_ms <= 0:
+            return self.current_time
+        return self.current_time + timedelta(milliseconds=self.latency_ms * (slice_index + 1))
+
+    def _apply_funding(self, timestamp: datetime) -> None:
+        if self.funding_rate == 0:
+            self._last_funding_time = timestamp
+            return
+        if self._last_funding_time is None:
+            self._last_funding_time = timestamp
+            return
+        delta_seconds = (timestamp - self._last_funding_time).total_seconds()
+        if delta_seconds <= 0:
+            return
+        interval_seconds = self.funding_interval_hours * 3600
+        rate_per_second = self.funding_rate / interval_seconds
+        for pos in self.positions.values():
+            notional = pos.current_price * pos.quantity
+            funding_cost = notional * rate_per_second * delta_seconds
+            if pos.side == Side.BUY:
+                self.cash -= funding_cost
+            else:
+                self.cash += funding_cost
+        self._last_funding_time = timestamp
+
+    def _check_liquidation(self, equity: float, timestamp: datetime) -> float:
+        if not self.positions:
+            return equity
+        total_notional = sum(
+            pos.current_price * pos.quantity for pos in self.positions.values()
+        )
+        maintenance = total_notional * self.maintenance_margin_pct
+        if total_notional > 0 and equity <= maintenance:
+            self._liquidate_positions(timestamp)
+            return self.cash
+        return equity
+
+    def _liquidate_positions(self, timestamp: datetime) -> None:
+        for symbol, pos in list(self.positions.items()):
+            closing_side = Side.SELL if pos.side == Side.BUY else Side.BUY
+            notional = pos.current_price * pos.quantity
+            fee_cost = notional * self.fee
+            self.cash -= fee_cost
+            if closing_side == Side.SELL:
+                self.cash += notional
+            else:
+                self.cash -= notional
+            self.trades.append(
+                Trade(
+                    id=str(uuid.uuid4()),
+                    order_id="liquidation",
+                    symbol=symbol,
+                    side=closing_side,
+                    quantity=pos.quantity,
+                    price=pos.current_price,
+                    commission=fee_cost,
+                    timestamp=timestamp,
+                )
+            )
+            del self.positions[symbol]
 
     def _realized_pnl(
         self, side: Side, entry: float, exit_price: float, qty: float
@@ -196,6 +317,14 @@ class BacktestEngine:
             initial_capital=self.config.initial_capital,
             slippage=self.config.slippage,
             fee=self.config.fee,
+            spread_bps=self.config.spread_bps,
+            latency_ms=self.config.latency_ms,
+            funding_rate=self.config.funding_rate,
+            funding_interval_hours=self.config.funding_interval_hours,
+            maintenance_margin_pct=self.config.maintenance_margin_pct,
+            partial_fill_enabled=self.config.partial_fill_enabled,
+            partial_fill_min_slice_pct=self.config.partial_fill_min_slice_pct,
+            partial_fill_max_slices=self.config.partial_fill_max_slices,
         )
 
     async def run_event_driven(self) -> BacktestResult:

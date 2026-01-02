@@ -4,6 +4,7 @@ from typing import Optional
 import aiohttp
 
 from .config import StrategyConfig, TradingBotConfig
+from .exchanges.bybit_ws import BybitWebsocketClient
 from .database import DatabaseManager
 from .exchange import IExchange, create_exchange_client
 from .messaging import MessagingClient, MockMessagingClient
@@ -27,6 +28,7 @@ class Container:
         self.messaging: Optional[MessagingClient] = None
         self.paper_broker: Optional[PaperBroker] = None
         self.exchange: Optional[IExchange] = None
+        self.bybit_ws: Optional[BybitWebsocketClient] = None
         self.strategy: Optional[TradingStrategy] = None
         self.run_id: str = "default_run"  # Should be set during init
 
@@ -70,6 +72,19 @@ class Container:
         )
         if self.exchange:
             await self.exchange.initialize()
+
+        # Bybit Websocket (Limited Live Ready)
+        if (
+            self.config.exchange.name == "bybit"
+            and self.config.app_mode in ["live", "testnet"]
+            and self.messaging
+        ):
+            self.bybit_ws = BybitWebsocketClient(
+                api_key=self.config.exchange.api_key,
+                api_secret=self.config.exchange.secret_key,
+                messaging=self.messaging,
+                testnet=self.config.exchange.testnet,
+            )
 
         # Strategy
         await self._init_strategy()

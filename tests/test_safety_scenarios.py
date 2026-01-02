@@ -111,7 +111,10 @@ async def test_safety_margin_block(scenario_log_handler):
         return_value={"marginRatio": 0.50, "found": True}
     )
     service.exchange = mock_client
-    await service._enter_long(price=100.0)
+    await service._enter_long(
+        price=100.0,
+        entry_bar_time=datetime.now(timezone.utc),
+    )
 
 
 @pytest.mark.asyncio

@@ -6,9 +6,6 @@ shadow_paper: false
 
 exchange:
   name: "zoomex"
-  api_key: "${ZOOMEX_API_KEY}"
-  secret_key: "${ZOOMEX_API_SECRET}"
-  passphrase: ""
   testnet: true
   base_url: "https://openapi-testnet.zoomex.com"
 

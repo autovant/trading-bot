@@ -341,6 +341,16 @@ class TradingStrategy:
                 return True
         return False
 
+    def _resolve_signal_timestamp(self, symbol: str) -> Optional[datetime]:
+        data = self.market_data.get(symbol, {}).get("signal")
+        if data is None or data.empty:
+            return None
+        if "timestamp" in data.columns:
+            ts = pd.to_datetime(data["timestamp"].iloc[-1], utc=True)
+        else:
+            ts = pd.to_datetime(data.index[-1], utc=True)
+        return ts.to_pydatetime()
+
     def _generate_client_id(self, symbol: str) -> str:
         return (
             f"{self.run_id}-{symbol}-{datetime.now(timezone.utc).strftime('%H%M%S%f')}"
@@ -522,6 +532,15 @@ class TradingStrategy:
         if symbol in self.processing_orders:
             logger.info(f"Signal ignored for {symbol}: Order processing in progress")
             return
+        if signal.timestamp is None:
+            resolved = self._resolve_signal_timestamp(symbol)
+            if resolved is None:
+                logger.error(
+                    "SAFETY_IDEMPOTENCY: Missing signal timestamp for %s; refusing execution",
+                    symbol,
+                )
+                return
+            signal.timestamp = resolved
         if self.data_stale_block_active:
             logger.warning(
                 "SAFETY_STALE_DATA: Blocking signal execution for %s due to stale data",

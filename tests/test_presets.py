@@ -2,7 +2,7 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from src.api_server import app
+from src.api.main import app
 from src.dynamic_strategy import StrategyConfig
 from src.presets import get_preset_strategies
 

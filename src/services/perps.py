@@ -13,7 +13,6 @@ from src.alerts.manager import AlertManager
 from src.app_logging.trade_logger import TradeLogger
 from src.config import CrisisModeConfig, PerpsConfig, TradingConfig
 from src.database import DatabaseManager, OrderIntent
-from src.engine.order_id_generator import generate_order_id
 from src.engine.order_intent_ledger import OrderIntentLedger
 from src.engine.perps_executor import (
     early_exit_reduce_only,
@@ -34,6 +33,12 @@ from src.strategies.perps_trend_atr_multi_tf import compute_signals_multi_tf
 from src.strategies.perps_trend_vwap import compute_signals
 
 logger = logging.getLogger(__name__)
+
+
+def _is_ambiguous_submit_error(exc: Exception) -> bool:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    return "timeout" in str(exc).lower()
 
 
 class PerpsService:
@@ -81,6 +86,8 @@ class PerpsService:
         self.last_entry_time: Optional[datetime] = None
         self.last_entry_price: Optional[float] = None
         self.last_entry_qty: Optional[float] = None
+        self.last_entry_intent_key: Optional[str] = None
+        self.pending_entry_intent_key: Optional[str] = None
         self.entry_equity: Optional[float] = None
         self.last_risk_blocked: Optional[bool] = None
         self.max_daily_loss_pct = (
@@ -106,6 +113,63 @@ class PerpsService:
         state_file = self.config.stateFile or "data/perps_state.json"
         self.state_path = Path(state_file)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _require_intent_ledger(self, *, context: str) -> bool:
+        if self.intent_ledger:
+            return True
+        logger.error(
+            "SAFETY_RECON_BLOCK: Order intent ledger missing for trading (%s).",
+            context,
+        )
+        self.reconciliation_block_active = True
+        return False
+
+    def _intent_client_id(self, idempotency_key: str) -> str:
+        run_id = self.intent_ledger.run_id if self.intent_ledger else (self.config_id or "perps")
+        return OrderIntentLedger.client_id_from_key(idempotency_key, run_id)
+
+    def _build_entry_intent_key(
+        self,
+        *,
+        quantity: float,
+        price: float,
+        stop_price: Optional[float],
+        take_profit: Optional[float],
+        entry_time: datetime,
+    ) -> str:
+        payload = {
+            "symbol": self.config.symbol,
+            "side": "buy",
+            "order_type": "market",
+            "quantity": round(quantity, 8),
+            "price": round(price, 8),
+            "stop_price": round(stop_price, 8) if stop_price is not None else None,
+            "take_profit": round(take_profit, 8) if take_profit is not None else None,
+            "entry_time": entry_time.isoformat(),
+            "strategy": self.strategy_name,
+            "run_id": self.config_id or "perps",
+        }
+        return OrderIntentLedger.build_idempotency_key(payload)
+
+    def _build_exit_intent_key(
+        self,
+        *,
+        quantity: float,
+        reason: str,
+        exit_time: datetime,
+    ) -> str:
+        payload = {
+            "symbol": self.config.symbol,
+            "side": "sell",
+            "order_type": "market",
+            "quantity": round(quantity, 8),
+            "reduce_only": True,
+            "reason": reason,
+            "exit_time": exit_time.isoformat(),
+            "strategy": self.strategy_name,
+            "run_id": self.config_id or "perps",
+        }
+        return OrderIntentLedger.build_idempotency_key(payload)
 
     def set_risk_manager(self, risk_manager: RiskManager) -> None:
         """Attach a RiskManager instance after construction."""
@@ -163,14 +227,13 @@ class PerpsService:
             await self._sync_time_or_halt(periodic=True)
             await self._refresh_account_state()
             await self._check_position_pnl()
+            await self._reconcile_open_orders(reason="periodic")
 
             if not await self._check_risk_limits():
                 return
 
             if not await self._check_session_limits():
                 return
-
-            await self._reconcile_open_orders(reason="periodic")
 
             ltf_limit = 100
             if self.config.useMultiTfAtrStrategy:
@@ -327,18 +390,61 @@ class PerpsService:
                 self.config.symbol,
                 self.current_position_qty,
             )
-            order_link_id = generate_order_id(
-                symbol=self.config.symbol,
-                side="Sell",
-                timestamp=datetime.now(timezone.utc),
+            exit_time = self.last_candle_time or datetime.now(timezone.utc)
+            idempotency_key = self._build_exit_intent_key(
+                quantity=self.current_position_qty,
+                reason="early_exit",
+                exit_time=exit_time,
             )
-            await early_exit_reduce_only(
-                self.exchange,
+            order_link_id = self._intent_client_id(idempotency_key)
+
+            if not self._require_intent_ledger(context="early_exit"):
+                return
+            intent, created = await self.intent_ledger.get_or_create_intent(
+                idempotency_key=idempotency_key,
+                client_id=order_link_id,
                 symbol=self.config.symbol,
-                qty=self.current_position_qty,
-                position_idx=self.config.positionIdx,
-                order_link_id=order_link_id,
+                side="sell",
+                order_type="market",
+                quantity=self.current_position_qty,
+                price=None,
+                stop_price=None,
+                reduce_only=True,
             )
+            if not created and not OrderIntentLedger.is_terminal(intent.status):
+                logger.warning(
+                    "Reduce-only intent already exists (%s); skipping duplicate submit",
+                    intent.idempotency_key,
+                )
+                await self._reconcile_open_orders(reason="duplicate_exit_intent")
+                return
+
+            try:
+                result = await early_exit_reduce_only(
+                    self.exchange,
+                    symbol=self.config.symbol,
+                    qty=self.current_position_qty,
+                    position_idx=self.config.positionIdx,
+                    order_link_id=order_link_id,
+                )
+            except Exception as exc:
+                status = "submitted" if _is_ambiguous_submit_error(exc) else "failed"
+                await self.intent_ledger.update_intent_status(
+                    intent,
+                    status=status,
+                    last_error=str(exc),
+                )
+                logger.error("Reduce-only exit submission failed: %s", exc)
+                if status == "submitted":
+                    await self._reconcile_open_orders(reason="ambiguous_exit_submit")
+                return
+            if isinstance(result, dict):
+                order_id = result.get("orderId") or result.get("order_id")
+                await self.intent_ledger.update_intent_status(
+                    intent,
+                    status="acked",
+                    order_id=order_id,
+                )
             self.current_position_qty = 0.0
             self.entry_bar_time = None
             if self.risk_manager:
@@ -370,18 +476,61 @@ class PerpsService:
                 self.current_position_qty,
                 bars_in_trade,
             )
-            order_link_id = generate_order_id(
-                symbol=self.config.symbol,
-                side="Sell",
-                timestamp=datetime.now(timezone.utc),
+            exit_time = ltf_df.index[-1].to_pydatetime()
+            idempotency_key = self._build_exit_intent_key(
+                quantity=self.current_position_qty,
+                reason=exit_reason,
+                exit_time=exit_time,
             )
-            await early_exit_reduce_only(
-                self.exchange,
+            order_link_id = self._intent_client_id(idempotency_key)
+
+            if not self._require_intent_ledger(context="strategy_exit"):
+                return True
+            intent, created = await self.intent_ledger.get_or_create_intent(
+                idempotency_key=idempotency_key,
+                client_id=order_link_id,
                 symbol=self.config.symbol,
-                qty=self.current_position_qty,
-                position_idx=self.config.positionIdx,
-                order_link_id=order_link_id,
+                side="sell",
+                order_type="market",
+                quantity=self.current_position_qty,
+                price=None,
+                stop_price=None,
+                reduce_only=True,
             )
+            if not created and not OrderIntentLedger.is_terminal(intent.status):
+                logger.warning(
+                    "Reduce-only intent already exists (%s); skipping duplicate submit",
+                    intent.idempotency_key,
+                )
+                await self._reconcile_open_orders(reason="duplicate_exit_intent")
+                return True
+
+            try:
+                result = await early_exit_reduce_only(
+                    self.exchange,
+                    symbol=self.config.symbol,
+                    qty=self.current_position_qty,
+                    position_idx=self.config.positionIdx,
+                    order_link_id=order_link_id,
+                )
+            except Exception as exc:
+                status = "submitted" if _is_ambiguous_submit_error(exc) else "failed"
+                await self.intent_ledger.update_intent_status(
+                    intent,
+                    status=status,
+                    last_error=str(exc),
+                )
+                logger.error("Strategy exit submission failed: %s", exc)
+                if status == "submitted":
+                    await self._reconcile_open_orders(reason="ambiguous_exit_submit")
+                return True
+            if isinstance(result, dict):
+                order_id = result.get("orderId") or result.get("order_id")
+                await self.intent_ledger.update_intent_status(
+                    intent,
+                    status="acked",
+                    order_id=order_id,
+                )
             self.current_position_qty = 0.0
             self.entry_bar_time = None
             if self.risk_manager:
@@ -411,18 +560,63 @@ class PerpsService:
         # 2. Close position if exists
         if self.current_position_qty > 0:
             try:
-                order_link_id = generate_order_id(
-                    symbol=self.config.symbol,
-                    side="Sell",
-                    timestamp=datetime.now(timezone.utc),
+                exit_time = datetime.now(timezone.utc)
+                idempotency_key = self._build_exit_intent_key(
+                    quantity=self.current_position_qty,
+                    reason="emergency_halt",
+                    exit_time=exit_time,
                 )
-                await early_exit_reduce_only(
-                    self.exchange,
-                    symbol=self.config.symbol,
-                    qty=self.current_position_qty,
-                    position_idx=self.config.positionIdx,
-                    order_link_id=order_link_id,
-                )
+                order_link_id = self._intent_client_id(idempotency_key)
+                if self._require_intent_ledger(context="halt"):
+                    intent, created = await self.intent_ledger.get_or_create_intent(
+                        idempotency_key=idempotency_key,
+                        client_id=order_link_id,
+                        symbol=self.config.symbol,
+                        side="sell",
+                        order_type="market",
+                        quantity=self.current_position_qty,
+                        price=None,
+                        stop_price=None,
+                        reduce_only=True,
+                    )
+                    if not created and not OrderIntentLedger.is_terminal(intent.status):
+                        logger.warning(
+                            "Reduce-only intent already exists (%s); skipping duplicate submit",
+                            intent.idempotency_key,
+                        )
+                    else:
+                        try:
+                            result = await early_exit_reduce_only(
+                                self.exchange,
+                                symbol=self.config.symbol,
+                                qty=self.current_position_qty,
+                                position_idx=self.config.positionIdx,
+                                order_link_id=order_link_id,
+                            )
+                        except Exception as exc:
+                            status = (
+                                "submitted"
+                                if _is_ambiguous_submit_error(exc)
+                                else "failed"
+                            )
+                            await self.intent_ledger.update_intent_status(
+                                intent,
+                                status=status,
+                                last_error=str(exc),
+                            )
+                            logger.error("Emergency exit submission failed: %s", exc)
+                            if status == "submitted":
+                                await self._reconcile_open_orders(
+                                    reason="ambiguous_halt_submit"
+                                )
+                            raise
+                        if isinstance(result, dict):
+                            order_id = result.get("orderId") or result.get("order_id")
+                            await self.intent_ledger.update_intent_status(
+                                intent,
+                                status="acked",
+                                order_id=order_id,
+                            )
                 logger.info(
                     "Submitted reduce-only exit for %s qty=%.6f",
                     self.config.symbol,
@@ -481,12 +675,10 @@ class PerpsService:
                 staleness,
                 self.config.maxDataStalenessSeconds,
             )
-            asyncio.create_task(
-                self.alert_sink.send_alert(
-                    "critical_stale_data",
-                    f"{label} candle stale by {staleness:.0f}s",
-                    {"symbol": self.config.symbol, "staleness_s": staleness},
-                )
+            self._dispatch_alert(
+                "critical_stale_data",
+                f"{label} candle stale by {staleness:.0f}s",
+                {"symbol": self.config.symbol, "staleness_s": staleness},
             )
             return True
 
@@ -501,17 +693,25 @@ class PerpsService:
                     gap,
                     max_gap,
                 )
-                asyncio.create_task(
-                    self.alert_sink.send_alert(
-                        "critical_stale_data_gap",
-                        f"{label} candle gap {gap:.0f}s exceeds {max_gap:.0f}s",
-                        {"symbol": self.config.symbol, "gap_s": gap},
-                    )
+                self._dispatch_alert(
+                    "critical_stale_data_gap",
+                    f"{label} candle gap {gap:.0f}s exceeds {max_gap:.0f}s",
+                    {"symbol": self.config.symbol, "gap_s": gap},
                 )
                 return True
 
         self.data_stale_block_active = False
         return False
+
+    def _dispatch_alert(
+        self, category: str, message: str, context: Optional[Dict[str, Any]] = None
+    ) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.alert_sink.send_alert(category, message, context))
+            return
+        loop.create_task(self.alert_sink.send_alert(category, message, context))
 
     async def _sync_time_or_halt(self, periodic: bool = False) -> None:
         if not hasattr(self.exchange, "sync_time"):
@@ -539,7 +739,7 @@ class PerpsService:
                     "limit_ms": self.config.timeSyncMaxSkewMs,
                 },
             )
-            raise ZoomexError("Time drift exceeded maximum threshold")
+            return
 
     @staticmethod
     def _safe_float(value: Any) -> Optional[float]:
@@ -840,62 +1040,71 @@ class PerpsService:
             risk_reward,
         )
 
-        entry_timestamp = datetime.now(timezone.utc)
-        order_link_id = generate_order_id(
-            symbol=self.config.symbol,
-            side="Buy",
-            timestamp=entry_timestamp,
+        if entry_bar_time is None:
+            logger.error(
+                "SAFETY_IDEMPOTENCY: Missing entry bar time for %s; refusing entry",
+                self.config.symbol,
+            )
+            return
+        entry_time = (
+            entry_bar_time
+            if entry_bar_time.tzinfo
+            else entry_bar_time.replace(tzinfo=timezone.utc)
         )
 
-        if self.intent_ledger:
-            idempotency_key = self.intent_ledger.build_idempotency_key(
-                {
-                    "symbol": self.config.symbol,
-                    "side": "buy",
-                    "order_type": "market",
-                    "quantity": round(rounded_qty, 8),
-                    "price": round(price, 8),
-                    "stop_price": round(sl_price, 8),
-                    "take_profit": round(tp_price, 8),
-                    "order_link_id": order_link_id,
-                    "timestamp": entry_timestamp.isoformat(),
-                }
-            )
-            intent, created = await self.intent_ledger.get_or_create_intent(
-                idempotency_key=idempotency_key,
-                client_id=order_link_id,
-                symbol=self.config.symbol,
-                side="buy",
-                order_type="market",
-                quantity=rounded_qty,
-                price=price,
-                stop_price=sl_price,
-                reduce_only=False,
-            )
-            if not created and not OrderIntentLedger.is_terminal(intent.status):
-                logger.warning(
-                    "Order intent already exists (%s); skipping duplicate submit",
-                    intent.idempotency_key,
-                )
-                await self._reconcile_open_orders(reason="duplicate_intent")
-                return
-        elif self.mode_name == "live":
-            logger.error(
-                "SAFETY_RECON_BLOCK: Order intent ledger missing for live trading."
-            )
-            self.reconciliation_block_active = True
+        idempotency_key = self._build_entry_intent_key(
+            quantity=rounded_qty,
+            price=price,
+            stop_price=sl_price,
+            take_profit=tp_price,
+            entry_time=entry_time,
+        )
+        order_link_id = self._intent_client_id(idempotency_key)
+
+        if not self._require_intent_ledger(context="entry"):
             return
 
-        result = await enter_long_with_brackets(
-            self.exchange,
+        intent, created = await self.intent_ledger.get_or_create_intent(
+            idempotency_key=idempotency_key,
+            client_id=order_link_id,
             symbol=self.config.symbol,
-            qty=rounded_qty,
-            take_profit=tp_price,
-            stop_loss=sl_price,
-            position_idx=self.config.positionIdx,
-            trigger_by=self.config.triggerBy,
-            order_link_id=order_link_id,
+            side="buy",
+            order_type="market",
+            quantity=rounded_qty,
+            price=price,
+            stop_price=sl_price,
+            reduce_only=False,
         )
+        if not created and not OrderIntentLedger.is_terminal(intent.status):
+            logger.warning(
+                "Order intent already exists (%s); skipping duplicate submit",
+                intent.idempotency_key,
+            )
+            await self._reconcile_open_orders(reason="duplicate_intent")
+            return
+
+        try:
+            result = await enter_long_with_brackets(
+                self.exchange,
+                symbol=self.config.symbol,
+                qty=rounded_qty,
+                take_profit=tp_price,
+                stop_loss=sl_price,
+                position_idx=self.config.positionIdx,
+                trigger_by=self.config.triggerBy,
+                order_link_id=order_link_id,
+            )
+        except Exception as exc:
+            status = "submitted" if _is_ambiguous_submit_error(exc) else "failed"
+            await self.intent_ledger.update_intent_status(
+                intent,
+                status=status,
+                last_error=str(exc),
+            )
+            logger.error("Entry order submission failed: %s", exc)
+            if status == "submitted":
+                await self._reconcile_open_orders(reason="ambiguous_submit")
+            return
 
         if self.intent_ledger and isinstance(result, dict):
             order_id = result.get("orderId") or result.get("order_id")
@@ -905,9 +1114,10 @@ class PerpsService:
                 order_id=order_id,
             )
 
-        self.current_position_qty = rounded_qty
+        self.last_entry_intent_key = idempotency_key
+        self.pending_entry_intent_key = idempotency_key
         self.entry_equity = self.equity_usdt
-        self.last_entry_time = entry_timestamp
+        self.last_entry_time = entry_time
         self.last_entry_price = price
         self.last_entry_qty = rounded_qty
         self.last_risk_blocked = False
@@ -918,10 +1128,6 @@ class PerpsService:
             result.get("orderId", "N/A"),
             order_link_id,
         )
-        if self.risk_manager:
-            self.risk_manager.register_open_position(
-                self.config.symbol, proposed_notional, risk_pct
-            )
         await self._refresh_account_state()
 
     async def _reconcile_positions(self) -> None:
@@ -1050,25 +1256,33 @@ class PerpsService:
         try:
             response = await self.exchange.get_open_orders(self.config.symbol)
             open_orders = response.get("list", []) if isinstance(response, dict) else []
-            if not open_orders:
-                return
-
             if not self.intent_ledger or not self.database:
-                self.reconciliation_block_active = True
-                logger.error(
-                    "SAFETY_RECON_BLOCK: Open orders detected but intent ledger unavailable."
-                )
-                await self.alert_sink.send_alert(
-                    "critical_reconciliation",
-                    "Open orders found but no intent ledger configured.",
-                    {"symbol": self.config.symbol, "reason": reason},
-                )
+                if open_orders:
+                    self.reconciliation_block_active = True
+                    logger.error(
+                        "SAFETY_RECON_BLOCK: Open orders detected but intent ledger unavailable."
+                    )
+                    await self.alert_sink.send_alert(
+                        "critical_reconciliation",
+                        "Open orders found but no intent ledger configured.",
+                        {"symbol": self.config.symbol, "reason": reason},
+                    )
                 return
 
             intents = await self.database.list_open_order_intents(
                 self.intent_ledger.mode, self.intent_ledger.run_id
             )
+            if not intents and not open_orders:
+                return
+
             intents_by_client = {intent.client_id: intent for intent in intents}
+            if not self.pending_entry_intent_key:
+                for intent in intents:
+                    if not OrderIntentLedger.is_terminal(intent.status):
+                        self.pending_entry_intent_key = intent.idempotency_key
+                        break
+
+            open_client_ids = set()
             unknown_orders = []
 
             for order in open_orders:
@@ -1081,6 +1295,7 @@ class PerpsService:
                 if not client_id or client_id not in intents_by_client:
                     unknown_orders.append(order_id or client_id or "unknown")
                     continue
+                open_client_ids.add(client_id)
                 intent = intents_by_client[client_id]
                 await self.intent_ledger.update_intent_status(
                     intent, status="acked", order_id=order_id
@@ -1098,10 +1313,10 @@ class PerpsService:
                     {"symbol": self.config.symbol, "orders": unknown_orders},
                 )
 
+            fill_agg: Dict[str, Dict[str, float]] = {}
             if hasattr(self.exchange, "get_fills"):
                 fills_resp = await self.exchange.get_fills(self.config.symbol)
                 fills = fills_resp.get("list", []) if isinstance(fills_resp, dict) else []
-                fill_agg: Dict[str, Dict[str, float]] = {}
                 for fill in fills:
                     client_id = fill.get("orderLinkId") or fill.get("clientOrderId")
                     if not client_id or client_id not in intents_by_client:
@@ -1129,34 +1344,71 @@ class PerpsService:
                         fee=float(fill.get("execFee") or 0.0),
                         timestamp=self._parse_timestamp_value(fill.get("execTime")),
                     )
-                for key, agg in fill_agg.items():
-                    intent = next(
-                        (intent for intent in intents_by_client.values() if intent.idempotency_key == key),
-                        None,
+
+            for key, agg in fill_agg.items():
+                intent = next(
+                    (
+                        intent
+                        for intent in intents_by_client.values()
+                        if intent.idempotency_key == key
+                    ),
+                    None,
+                )
+                if not intent:
+                    continue
+                prev_filled = float(intent.filled_qty or 0.0)
+                new_filled = float(agg["qty"])
+                delta = new_filled - prev_filled
+                avg_price = agg["cost"] / agg["qty"] if agg["qty"] else None
+                status = (
+                    "filled" if agg["qty"] >= intent.quantity else "partially_filled"
+                )
+                await self.intent_ledger.update_intent_status(
+                    intent,
+                    status=status,
+                    filled_qty=agg["qty"],
+                    avg_fill_price=avg_price,
+                )
+                if delta > 0 and avg_price:
+                    await self._apply_fill_delta(
+                        intent=intent,
+                        filled_delta=delta,
+                        avg_price=avg_price,
                     )
-                    if not intent:
-                        continue
-                    prev_filled = float(intent.filled_qty or 0.0)
-                    new_filled = float(agg["qty"])
-                    delta = new_filled - prev_filled
-                    avg_price = agg["cost"] / agg["qty"] if agg["qty"] else None
-                    status = (
-                        "filled"
-                        if agg["qty"] >= intent.quantity
-                        else "partially_filled"
-                    )
+                if (
+                    self.pending_entry_intent_key == intent.idempotency_key
+                    and OrderIntentLedger.is_terminal(status)
+                ):
+                    self.pending_entry_intent_key = None
+
+            missing_intents = []
+            for intent in intents:
+                if OrderIntentLedger.is_terminal(intent.status):
+                    continue
+                if intent.client_id in open_client_ids:
+                    continue
+                if intent.idempotency_key in fill_agg:
+                    continue
+                missing_intents.append(intent)
+
+            if missing_intents:
+                for intent in missing_intents:
                     await self.intent_ledger.update_intent_status(
                         intent,
-                        status=status,
-                        filled_qty=agg["qty"],
-                        avg_fill_price=avg_price,
+                        status="failed",
+                        last_error="not_found_on_exchange",
                     )
-                    if delta > 0 and avg_price:
-                        await self._apply_fill_delta(
-                            intent=intent,
-                            filled_delta=delta,
-                            avg_price=avg_price,
-                        )
+                    if self.pending_entry_intent_key == intent.idempotency_key:
+                        self.pending_entry_intent_key = None
+                self.reconciliation_block_active = True
+                await self.alert_sink.send_alert(
+                    "critical_reconciliation",
+                    "Open intent missing from exchange; trading halted.",
+                    {
+                        "symbol": self.config.symbol,
+                        "intents": [intent.client_id for intent in missing_intents],
+                    },
+                )
         except Exception as exc:
             logger.error("Order reconciliation failed: %s", exc, exc_info=True)
 
@@ -1185,11 +1437,25 @@ class PerpsService:
                 self.config.riskPct,
             )
 
+    async def _has_open_intents(self) -> bool:
+        if not self.intent_ledger or not self.database:
+            return False
+        intents = await self.database.list_open_order_intents(
+            self.intent_ledger.mode, self.intent_ledger.run_id
+        )
+        return any(intent.symbol == self.config.symbol for intent in intents)
+
     async def _check_risk_limits(self) -> bool:
         if self.reconciliation_block_active:
             logger.warning(
                 "SAFETY_RECON_BLOCK: Reconciliation guard active; refusing new entries until the "
                 "existing exchange position is resolved."
+            )
+            return False
+
+        if await self._has_open_intents():
+            logger.warning(
+                "SAFETY_INFLIGHT_INTENT: Open order intents detected; refusing new entries."
             )
             return False
 

@@ -1,6 +1,21 @@
 {
   "tests/test_api_server.py::TestClient": true,
+  "tests/test_api_server.py::test_health": true,
+  "tests/test_api_server.py::test_list_presets": true,
+  "tests/test_api_server.py::test_save_and_get_strategy": true,
+  "tests/test_api_server.py::test_place_order": true,
+  "tests/test_api_server.py::test_backtest_submission": true,
+  "tests/test_presets.py::TestPresets::test_presets_endpoint": true,
   "tests/test_presets.py::TestClient": true,
   "tests/test_presets.py::TestPresets": true,
-  "tests/test_api_resilience.py::TestClient": true
+  "tests/test_api_security_mock.py::test_api_security": true,
+  "tests/test_database_rollup.py::test_aggregate_daily_pnl_rollup": true,
+  "tests/test_multi_strategy.py::test_multi_strategy_execution": true,
+  "tests/test_strategy_logic.py::test_pnl_accumulation_and_position_sizing": true,
+  "tests/test_strategy_logic.py::test_race_condition_protection": true,
+  "tests/test_api_endpoints.py": true,
+  "tests/test_api_resilience.py": true,
+  "tests/test_api_server.py": true,
+  "tests/test_container.py": true,
+  "tests/test_presets.py": true
 }

@@ -56,8 +56,14 @@ class ZoomexV3Client:
         self.session = session
         default_base = "https://openapi.zoomex.com"
         self.base_url = base_url or os.getenv("ZOOMEX_BASE", default_base)
-        self.api_key = api_key or os.getenv("ZOOMEX_API_KEY")
-        self.api_secret = api_secret or os.getenv("ZOOMEX_API_SECRET")
+        use_testnet_env = False
+        if mode_name.lower() == "testnet":
+            use_testnet_env = True
+        if "testnet" in self.base_url.lower():
+            use_testnet_env = True
+        env_prefix = "ZOOMEX_TESTNET" if use_testnet_env else "ZOOMEX"
+        self.api_key = api_key or os.getenv(f"{env_prefix}_API_KEY")
+        self.api_secret = api_secret or os.getenv(f"{env_prefix}_API_SECRET")
         self.category = category
         self.max_retries = max_retries
         self.mode_name = mode_name

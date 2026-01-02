@@ -42,6 +42,17 @@ class OrderIntentLedger:
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
     @staticmethod
+    def build_child_idempotency_key(
+        parent_key: str, child_type: str, payload: dict
+    ) -> str:
+        canonical = {
+            "parent": parent_key,
+            "child_type": child_type,
+            "payload": payload,
+        }
+        return OrderIntentLedger.build_idempotency_key(canonical)
+
+    @staticmethod
     def client_id_from_key(idempotency_key: str, run_id: str) -> str:
         return f"{run_id}-{idempotency_key[:24]}"
 
