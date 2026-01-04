@@ -1,6 +1,8 @@
 import asyncio
 from datetime import datetime, timezone
 
+import pytest
+
 from src.config import LatencyConfig, PaperConfig, PartialFillConfig
 from src.database import DatabaseManager
 from src.models import MarketSnapshot
@@ -186,3 +188,53 @@ async def _test_pnl_calculation_impl():
 
 def test_pnl_calculation():
     run_async(_test_pnl_calculation_impl())
+
+
+async def _test_partial_fill_splits_impl():
+    manager = DatabaseManager(":memory:")
+    await manager.initialize()
+
+    paper_config = PaperConfig(
+        fee_bps=0.0,
+        maker_rebate_bps=0.0,
+        slippage_bps=0.0,
+        latency_ms=LatencyConfig(mean=0.0, p95=0.0),
+        partial_fill=PartialFillConfig(
+            enabled=True, min_slice_pct=0.2, max_slices=3, randomize=False
+        ),
+    )
+    broker = PaperBroker(
+        config=paper_config,
+        database=manager,
+        mode="backtest",
+        run_id="partial_test",
+        initial_balance=10000.0,
+    )
+
+    try:
+        symbol = "BTCUSDT"
+        snapshot = MarketSnapshot(
+            symbol=symbol,
+            best_bid=50000.0,
+            best_ask=50010.0,
+            bid_size=1.0,
+            ask_size=1.0,
+            last_price=50005.0,
+            timestamp=datetime.now(timezone.utc),
+        )
+        await broker.update_market(snapshot)
+
+        await broker.place_order(
+            symbol=symbol, side="buy", order_type="market", quantity=9.0
+        )
+        await asyncio.sleep(0.01)
+
+        trades = await manager.get_trades(symbol=symbol, run_id="partial_test")
+        assert len(trades) == 3
+        assert sum(trade.quantity for trade in trades) == pytest.approx(9.0)
+    finally:
+        await manager.close()
+
+
+def test_partial_fill_splits():
+    run_async(_test_partial_fill_splits_impl())

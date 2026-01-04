@@ -12,6 +12,8 @@ A production-ready cryptocurrency trading bot with advanced strategy implementat
 - **Docker Support**: Containerized deployment with docker-compose
 - **FastAPI Microservices**: Python-based execution, feed, risk, replay, reporter, and ops API services connected via NATS
 - **Real-time Communication**: Publish-subscribe messaging for market data and trading signals
+- **Alert System**: Webhook-based alerts for critical events (e.g., Slack, Discord)
+- **Websocket Integration**: Direct exchange websocket connection for low-latency order updates (Bybit/Zoomex)
 
 ## Quickstart
 
@@ -96,14 +98,32 @@ perps:
   consecutiveLossLimit: null # Circuit breaker (null = disabled)
 ```
 
-### Environment Variables
+### Alert Configuration
 
-Set the following environment variables for Zoomex API access:
+The bot supports sending alerts via webhooks (e.g., to Slack, Discord, or generic HTTP endpoints).
+
+Set the `ALERT_WEBHOOK_URL` environment variable:
 
 ```bash
-export ZOOMEX_API_KEY="your_api_key"
-export ZOOMEX_API_SECRET="your_api_secret"
-export ZOOMEX_BASE="https://openapi-testnet.zoomex.com"  # Optional, defaults to prod
+export ALERT_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+```
+
+### Websocket Integration (Limited Live Ready)
+
+For lower latency order updates in `live` or `testnet` modes, the bot uses a direct websocket connection to the exchange (currently supports Bybit/Zoomex).
+
+- **Enabled automatically** when `APP_MODE` is `live` or `testnet` and the exchange is `bybit` (or compatible).
+- **Requires**: Standard API credentials (`EXCHANGE_API_KEY`, `EXCHANGE_SECRET_KEY`) set in environment.
+
+### Environment Variables
+
+Set the following environment variables for API access:
+
+```bash
+export EXCHANGE_API_KEY="your_api_key"
+export EXCHANGE_SECRET_KEY="your_api_secret"
+export ZOOMEX_BASE="https://openapi-testnet.zoomex.com"  # Optional
+export ALERT_WEBHOOK_URL="https://your-webhook-url"      # Optional, for alerts
 ```
 
 ### Strategy Rules

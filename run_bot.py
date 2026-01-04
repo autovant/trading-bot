@@ -30,7 +30,9 @@ import aiohttp
 from src.app_logging.trade_logger import TradeLogger
 from src.config import PerpsConfig, TradingBotConfig, get_config
 from src.database import DatabaseManager
+from src.exchanges.paper_perps import PaperPerpsExchange
 from src.exchanges.zoomex_v3 import ZoomexV3Client
+from src.paper_trader import PaperBroker
 from src.risk.risk_manager import RiskManager
 from src.security.mode_guard import (
     require_credentials,
@@ -321,6 +323,7 @@ class TradingBot:
         self.runtime_health_thread: Optional[threading.Thread] = None
         self.database: Optional[DatabaseManager] = None
         self.zoomex_credentials: Optional[Tuple[str, str]] = None
+        self.paper_broker: Optional[PaperBroker] = None
 
     def _require_config(self) -> TradingBotConfig:
         if self.config is None:
@@ -354,22 +357,38 @@ class TradingBot:
         await self.database.initialize()
 
         if hasattr(self.config, "perps") and self.config.perps.enabled:
-            api_key, api_secret = self.zoomex_credentials or resolve_zoomex_credentials(
-                use_testnet=self.config.perps.useTestnet
-            )
-            label = (
-                "Zoomex testnet" if self.config.perps.useTestnet else "Zoomex live"
-            )
-            require_credentials(label, api_key, api_secret)
-            exchange = ZoomexV3Client(
-                self.session,
-                base_url=self.config.exchange.base_url or os.getenv("ZOOMEX_BASE"),
-                api_key=api_key,
-                api_secret=api_secret,
-                mode_name=self.mode,
-                max_requests_per_second=self.config.perps.maxRequestsPerSecond,
-                max_requests_per_minute=self.config.perps.maxRequestsPerMinute,
-            )
+            if self.mode == "paper":
+                self.paper_broker = PaperBroker(
+                    config=self.config.paper,
+                    database=self.database,
+                    mode="paper",
+                    run_id=self.active_config_id or "paper",
+                    initial_balance=self.config.trading.initial_capital,
+                    risk_config=self.config.risk_management,
+                )
+                exchange = PaperPerpsExchange(
+                    exchange_config=self.config.exchange,
+                    perps_config=self.config.perps,
+                    broker=self.paper_broker,
+                )
+            else:
+                api_key, api_secret = (
+                    self.zoomex_credentials
+                    or resolve_zoomex_credentials(use_testnet=self.config.perps.useTestnet)
+                )
+                label = (
+                    "Zoomex testnet" if self.config.perps.useTestnet else "Zoomex live"
+                )
+                require_credentials(label, api_key, api_secret)
+                exchange = ZoomexV3Client(
+                    self.session,
+                    base_url=self.config.exchange.base_url or os.getenv("ZOOMEX_BASE"),
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    mode_name=self.mode,
+                    max_requests_per_second=self.config.perps.maxRequestsPerSecond,
+                    max_requests_per_minute=self.config.perps.maxRequestsPerMinute,
+                )
             self.perps_service = PerpsService(
                 self.config.perps,
                 exchange,
@@ -713,12 +732,18 @@ class TradingBot:
             exchange_base_url=base_url,
         )
 
-        api_key, api_secret = resolve_zoomex_credentials(
-            use_testnet=self.config.perps.useTestnet
-        )
-        label = "Zoomex testnet" if self.config.perps.useTestnet else "Zoomex live"
-        require_credentials(label, api_key, api_secret)
-        self.zoomex_credentials = (api_key, api_secret)
+        if self.mode == "paper":
+            self.zoomex_credentials = None
+            logger.info("Paper mode: exchange credentials not required.")
+        else:
+            api_key, api_secret = resolve_zoomex_credentials(
+                use_testnet=self.config.perps.useTestnet
+            )
+            label = (
+                "Zoomex testnet" if self.config.perps.useTestnet else "Zoomex live"
+            )
+            require_credentials(label, api_key, api_secret)
+            self.zoomex_credentials = (api_key, api_secret)
 
         logger.info(f"Symbol: {self.config.perps.symbol}")
         logger.info(f"Interval: {self.config.perps.interval}m")

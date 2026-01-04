@@ -1,0 +1,82 @@
+# Confluence Signal Engine Configuration
+# This file configures subscriptions, strategy profiles, and alert destinations.
+
+# =============================================================================
+# Subscriptions
+# =============================================================================
+# Each subscription defines an exchange/symbol/timeframe combination to monitor.
+# Signals are generated on candle close for each active subscription.
+
+subscriptions:
+  - exchange: bybit
+    symbol: BTCUSDT
+    timeframe: 1h
+    strategy: swing_4h
+    enabled: true
+    
+  - exchange: bybit
+    symbol: ETHUSDT
+    timeframe: 4h
+    strategy: swing_4h
+    enabled: true
+    
+  - exchange: bybit
+    symbol: SOLUSDT
+    timeframe: 1h
+    strategy: swing_4h
+    enabled: true
+
+# =============================================================================
+# Inline Strategy Definitions (optional)
+# =============================================================================
+# Strategies can also be loaded from individual JSON files in the strategies/ dir.
+
+strategies:
+  aggressive_scalp:
+    description: "Aggressive scalp for volatile markets"
+    timeframe: 5m
+    weights:
+      trend: 0.15
+      oscillator: 0.40
+      vwap: 0.25
+      structure: 0.20
+    buy_threshold: 70
+    sell_threshold: 30
+    min_trend_score: 5
+    gates:
+      min_candles: 200
+      cooldown_candles: 10
+      atr_pct_max: 0.03
+      volume_zscore_min: -0.5
+      risk_off: false
+
+# =============================================================================
+# Alert Configuration
+# =============================================================================
+
+alerts:
+  websocket:
+    enabled: true
+    
+  webhooks:
+    # Example Discord webhook
+    # - url: ${ALERT_WEBHOOK_URL}
+    #   secret: ${WEBHOOK_SECRET}
+    #   enabled: true
+    #   retry_count: 3
+    #   timeout_seconds: 10
+    
+  redis:
+    enabled: false
+    url: redis://localhost:6379
+    channel: signals
+
+# =============================================================================
+# Engine Settings
+# =============================================================================
+
+# Maximum concurrent subscriptions (bounded asyncio tasks)
+max_concurrent_subscriptions: 10
+
+# Poll interval as fraction of timeframe (0.9 = 90% of candle duration)
+poll_interval_multiplier: 0.9

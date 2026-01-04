@@ -35,6 +35,7 @@ services:
       PYTHONPATH: /app
       EXCHANGE_API_KEY: ${EXCHANGE_API_KEY}
       EXCHANGE_SECRET_KEY: ${EXCHANGE_SECRET_KEY}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL}
     read_only: true
     tmpfs:
       - /tmp
@@ -169,6 +170,7 @@ services:
     environment:
       APP_MODE: ${APP_MODE:-paper}
       PYTHONPATH: /app
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL}
     command: [ "python3", "-m", "uvicorn", "src.services.risk:app", "--host", "0.0.0.0", "--port", "8084" ]
     depends_on:
       - nats
@@ -202,6 +204,29 @@ services:
       - ./config:/app/config:ro
     ports:
       - "8085:8085"
+
+  signal-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: signal-engine
+    restart: unless-stopped
+    environment:
+      APP_MODE: ${APP_MODE:-paper}
+      PYTHONPATH: /app
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+    command: [ "python3", "-m", "uvicorn", "src.signal_engine.main:app", "--host", "0.0.0.0", "--port", "8086" ]
+    depends_on:
+      - nats
+    ports:
+      - "8086:8086"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./src:/app/src:ro
+      - ./config:/app/config:ro
 
   prometheus:
     image: prom/prometheus:v2.37.0

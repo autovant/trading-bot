@@ -413,15 +413,9 @@ class PaperBroker:
         if order.order_type == "market":
             slippage_bps = self._compute_slippage_bps(snapshot, order_side)
             price = self._apply_slippage(snapshot, order_side, slippage_bps)
-            return [
-                (
-                    self._sample_latency_ms(),
-                    order.quantity,
-                    price,
-                    False,
-                    slippage_bps,
-                )
-            ]
+            return self._plan_fills(
+                order.quantity, price, maker=False, slippage_bps=slippage_bps
+            )
 
         if order.order_type == "limit":
             if order.price is None:
@@ -430,15 +424,9 @@ class PaperBroker:
             if self._limit_crosses_spread(order_side, order.price, snapshot):
                 slippage_bps = self._compute_slippage_bps(snapshot, order_side)
                 price = self._apply_slippage(snapshot, order_side, slippage_bps)
-                return [
-                    (
-                        self._sample_latency_ms(),
-                        order.quantity,
-                        price,
-                        False,
-                        slippage_bps,
-                    )
-                ]
+                return self._plan_fills(
+                    order.quantity, price, maker=False, slippage_bps=slippage_bps
+                )
 
             # Resting on the book as maker
             return []
@@ -500,13 +488,22 @@ class PaperBroker:
         if not self.config.partial_fill.enabled or quantity <= 0:
             return [quantity]
 
-        slices = min(
-            max(1, self._random.randint(1, self.config.partial_fill.max_slices)),
-            self.config.partial_fill.max_slices,
-        )
+        min_slice_pct = self.config.partial_fill.min_slice_pct
+        max_slices_by_min = max(1, int(1 / min_slice_pct))
+        max_slices = min(self.config.partial_fill.max_slices, max_slices_by_min)
+        if self.config.partial_fill.randomize:
+            slices = min(max(1, self._random.randint(1, max_slices)), max_slices)
+        else:
+            slices = max_slices
         plan: List[float] = []
         remaining = quantity
-        min_slice = quantity * self.config.partial_fill.min_slice_pct
+        min_slice = quantity * min_slice_pct
+
+        if not self.config.partial_fill.randomize:
+            base_qty = quantity / slices
+            plan = [base_qty for _ in range(slices - 1)]
+            plan.append(max(quantity - sum(plan), 0.0))
+            return [qty for qty in plan if qty > 0]
 
         for idx in range(1, slices):
             max_remaining = remaining - min_slice * (slices - idx)
@@ -520,6 +517,25 @@ class PaperBroker:
 
         plan.append(max(remaining, 0.0))
         return [qty for qty in plan if qty > 0]
+
+    def _plan_fills(
+        self,
+        quantity: float,
+        price: float,
+        *,
+        maker: bool,
+        slippage_bps: float,
+    ) -> List[Tuple[float, float, float, bool, float]]:
+        return [
+            (
+                self._sample_latency_ms(),
+                fill_qty,
+                price,
+                maker,
+                slippage_bps,
+            )
+            for fill_qty in self._build_partial_fill_plan(quantity)
+        ]
 
     async def _finalise_fill(
         self,
@@ -731,10 +747,12 @@ class PaperBroker:
     async def _fill_resting_limit(
         self, rest: _RestingOrder, snapshot: MarketSnapshot
     ) -> None:
-        fills = self._simulate_order(
-            snapshot,
-            rest.order,
-            reduce_only=rest.reduce_only,
+        price = rest.limit_price
+        fills = self._plan_fills(
+            rest.remaining_qty,
+            price,
+            maker=True,
+            slippage_bps=0.0,
         )
         for delay_ms, qty, price, maker, slippage_bps in fills:
             asyncio.create_task(

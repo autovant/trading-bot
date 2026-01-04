@@ -1,0 +1,21 @@
+{
+    "name": "scalp_1m",
+    "description": "Aggressive scalping strategy for 1-minute timeframe",
+    "timeframe": "1m",
+    "weights": {
+        "trend": 0.20,
+        "oscillator": 0.35,
+        "vwap": 0.25,
+        "structure": 0.20
+    },
+    "buy_threshold": 65,
+    "sell_threshold": 35,
+    "min_trend_score": 8,
+    "gates": {
+        "min_candles": 200,
+        "cooldown_candles": 5,
+        "atr_pct_max": 0.02,
+        "volume_zscore_min": -1.0,
+        "risk_off": false
+    }
+}

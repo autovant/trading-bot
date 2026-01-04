@@ -129,8 +129,7 @@ async def lifespan(app: FastAPI):
     await _state.exchange.initialize()
 
     # Start background tasks
-    # _state.rollup_task = asyncio.create_task(_pnl_rollup_loop())
-    # TODO: Move cleanup loop to a service
+
 
     yield
 

@@ -16,6 +16,7 @@ from src.exchange import ExchangeClient
 from src.exchanges.bybit_ws import BybitWebsocketClient
 from src.logging_config import setup_logging
 from src.messaging import MessagingClient
+from src.exchanges.paper_perps import PaperPerpsExchange
 from src.paper_trader import PaperBroker
 from src.presets import get_preset_strategies
 from src.services.market_data import MarketDataPublisher
@@ -149,9 +150,16 @@ class TradingEngine:
             if hasattr(self.config, "perps"):
                 logger.info("Initializing PerpsService...")
                 try:
+                    perps_exchange = self.exchange
+                    if self.config.app_mode != "live" and self.paper_broker:
+                        perps_exchange = PaperPerpsExchange(
+                            exchange_config=self.config.exchange,
+                            perps_config=self.config.perps,
+                            broker=self.paper_broker,
+                        )
                     self.perps_service = PerpsService(
                         self.config.perps,
-                        self.exchange,
+                        perps_exchange,
                         trading_config=self.config.trading,
                         crisis_config=self.config.risk_management.crisis_mode,
                         database=self.database,

@@ -1,0 +1,21 @@
+{
+    "name": "trend_1d",
+    "description": "Conservative trend-following strategy for daily timeframe",
+    "timeframe": "1d",
+    "weights": {
+        "trend": 0.40,
+        "oscillator": 0.20,
+        "vwap": 0.15,
+        "structure": 0.25
+    },
+    "buy_threshold": 55,
+    "sell_threshold": 45,
+    "min_trend_score": 12,
+    "gates": {
+        "min_candles": 200,
+        "cooldown_candles": 2,
+        "atr_pct_max": 0.08,
+        "volume_zscore_min": -1.0,
+        "risk_off": false
+    }
+}

@@ -1,0 +1,22 @@
+{
+    "name": "swing_4h",
+    "description": "Balanced swing trading strategy for 4-hour timeframe",
+    "timeframe": "4h",
+    "weights": {
+        "trend": 0.35,
+        "oscillator": 0.25,
+        "vwap": 0.20,
+        "structure": 0.20
+    },
+    "buy_threshold": 60,
+    "sell_threshold": 40,
+    "min_trend_score": 10,
+    "gates": {
+        "min_candles": 200,
+        "cooldown_candles": 3,
+        "atr_pct_max": 0.05,
+        "volume_zscore_min": -0.5,
+        "risk_off": false
+    },
+    "htf_confirm": "1d"
+}
