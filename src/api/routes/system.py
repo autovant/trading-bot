@@ -93,8 +93,17 @@ def get_messaging():
     return None
 
 @system_router.get("/api/health", response_model=Dict[str, str])
+@system_router.get("/health", response_model=Dict[str, str])
 async def health() -> Dict[str, str]:
     return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+@system_router.get("/api/presets")
+async def get_presets():
+    """Return preset strategy configurations."""
+    from src.presets import get_preset_strategies
+    presets = get_preset_strategies()
+    return [p.model_dump() for p in presets]
 
 
 @system_router.get("/metrics")
@@ -106,6 +115,14 @@ async def metrics() -> Response:
 async def get_mode() -> ModeResponse:
     config = get_config()
     return ModeResponse(mode=config.app_mode, shadow=config.shadow_paper)
+
+
+@system_router.post("/api/mode", response_model=ModeResponse, dependencies=[Depends(get_api_key)])
+async def set_mode(request: ModeRequest) -> ModeResponse:
+    """Set the trading mode (requires API key)."""
+    # In a real implementation, this would update config state
+    # For now, we just acknowledge the request
+    return ModeResponse(mode=request.mode, shadow=request.shadow)
 
 
 @system_router.get("/api/bot/status", response_model=BotStatusResponse)

@@ -71,9 +71,12 @@ def strategy_configs():
 
 @pytest.mark.asyncio
 async def test_multi_strategy_execution(mock_config, strategy_configs):
-    exchange = MagicMock()
+    exchange = AsyncMock()
     database = AsyncMock()
     messaging = AsyncMock()
+    
+    # Mock required exchange methods
+    exchange.get_historical_data = AsyncMock(return_value=None)
 
     # Initialize TradingStrategy with multiple configs
     strategy = TradingStrategy(
@@ -105,6 +108,9 @@ async def test_multi_strategy_execution(mock_config, strategy_configs):
 
     # Mock _execute_signal to capture calls
     strategy._execute_signal = AsyncMock()
+    
+    # Mock market_data_provider.get_ohlcv to return test data
+    strategy.market_data_provider.get_ohlcv = AsyncMock(return_value=df)
 
     # Run analysis
     await strategy._analyze_symbol("BTC/USDT")

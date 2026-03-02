@@ -7,7 +7,7 @@ import time
 from typing import Dict, Any, Callable, Optional, List
 
 import websockets
-from websockets.client import Connect
+
 
 from ..messaging import MessagingClient
 
@@ -61,7 +61,7 @@ class BybitWebsocketClient:
             await self._authenticate()
             
             # Subscribe
-            await self._subscribe(["order"])
+            await self._subscribe(["order", "execution"])
 
             # Start heartbeat
             heartbeat_task = asyncio.create_task(self._heartbeat())
@@ -131,6 +131,8 @@ class BybitWebsocketClient:
         topic = data.get("topic")
         if topic == "order":
             await self._process_order_update(data)
+        elif topic == "execution":
+            await self._process_execution_update(data)
 
     async def _process_order_update(self, data: Dict[str, Any]):
         # data['data'] is a list of order updates
@@ -138,9 +140,16 @@ class BybitWebsocketClient:
         for update in updates:
             logger.info(f"Received order update: {update.get('orderId')} status={update.get('orderStatus')}")
             # Publish to NATS
-            # Subject: trading.orders.update (appending .update to base subject inferred)
-            # Or use the configured subject. configuring/strategy.yaml has trading.orders
+            # Subject: trading.orders.update
             await self.messaging.publish("trading.orders.update", update)
+
+    async def _process_execution_update(self, data: Dict[str, Any]):
+        # data['data'] is a list of execution reports (fills)
+        updates = data.get("data", [])
+        for update in updates:
+            logger.info(f"Received execution update: {update.get('execId')} order={update.get('orderId')} price={update.get('execPrice')}")
+            # Publish to NATS
+            await self.messaging.publish("trading.executions.update", update)
 
     async def start(self):
         while True:

@@ -103,6 +103,34 @@ class ExecutionEngine:
                 symbol,
             )
             return None
+        
+        # Verify mode safety
+        ex_name = self.exchange.__class__.__name__
+        if self.mode == "paper" and "LiveExchange" in ex_name:
+             logger.error(
+                "SAFETY_MODE_MISMATCH: Attempting to trade PERMANENTLY BLOCKED. "
+                "Mode is 'paper' but Exchange is '%s'.", ex_name
+             )
+             return None
+        if self.mode == "live" and "Paper" in ex_name:
+             logger.warning(
+                "SAFETY_MODE_MISMATCH: Mode is 'live' but Exchange is '%s'. "
+                "Executions will remain virtual.", ex_name
+             )
+
+        # Check for clock drift
+        if hasattr(self.exchange, "time_offset_ms"):
+            drift = self.exchange.time_offset_ms
+            max_drift = self.config.perps.timeSyncMaxSkewMs
+            if abs(drift) > max_drift:
+                logger.error(
+                    "SAFETY_CLOCK_DRIFT: Drift %dms exceeds limit %dms; blocking order for %s",
+                    drift,
+                    max_drift,
+                    symbol,
+                )
+                return None
+
 
         if not idempotency_key:
             logger.error(
@@ -143,16 +171,20 @@ class ExecutionEngine:
             return None
 
         try:
-            response = await self.exchange.place_order(
-                symbol=symbol,
-                side=side,
-                order_type=order_type,
-                quantity=quantity,
-                price=price,
-                stop_price=stop_price,
-                reduce_only=reduce_only,
-                client_id=intent.client_id,
-                is_shadow=is_shadow,
+            timeout_sec = self.config.perps.orderAckTimeoutSeconds
+            response = await asyncio.wait_for(
+                self.exchange.place_order(
+                    symbol=symbol,
+                    side=side,
+                    order_type=order_type,
+                    quantity=quantity,
+                    price=price,
+                    stop_price=stop_price,
+                    reduce_only=reduce_only,
+                    client_id=intent.client_id,
+                    is_shadow=is_shadow,
+                ),
+                timeout=timeout_sec,
             )
             if response:
                 await self._record_order_ack(response)

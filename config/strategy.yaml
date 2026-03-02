@@ -18,7 +18,7 @@ data:
     signal: 1h
 database:
   backup_interval: 3600
-  url: postgresql://tradingbot:tradingbot@localhost:5432/tradingbot
+  url: sqlite:///data/trades.db
 exchange:
   base_url: https://api-testnet.bybit.com
   name: bybit
@@ -72,6 +72,7 @@ perps:
   symbol: SOLUSDT
   takeProfitPct: 0.03
   triggerBy: LastPrice
+  useAdvancedStrategy: true
   useTestnet: true
 replay:
   end: '2024-12-31'

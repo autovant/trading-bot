@@ -1,853 +1,660 @@
-"use client";
 
-import React, { useEffect, useState } from "react";
-import BacktestResults from "./BacktestResults";
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Play, Save, Plus, Trash2, Zap, Box, Activity,
+  FolderOpen, FilePlus, ChevronRight, BarChart3,
+  X, AlertCircle, RotateCcw, BrainCircuit, Calendar, Percent
+} from 'lucide-react';
+import { Card } from '@/components/ui/Card';
+import { BacktestResult, BacktestRecord, IndicatorDefinition, RuleCondition, StrategyConfig } from '@/types';
+import { runBacktest, calculateBacktestStats } from '@/services/strategyEngine';
+import { MarketStream } from '@/services/marketStream';
+import { getStrategies, saveStrategy, deleteStrategy, createNewStrategy, DEFAULT_STRATEGY, saveBacktestResult, getBacktestHistory } from '@/services/strategyStorage';
+import { SUPPORTED_EXCHANGES, getExchange } from '@/services/exchanges';
+import { BacktestResultsView } from './BacktestResultsView';
+import { cn } from '@/lib/utils';
 
-// --- Types matching Backend Schema ---
+interface StrategyBuilderProps {
+  globalSymbol?: string;
+}
 
-type IndicatorConfig = {
-  name: string;
-  params: Record<string, string | number>;
-};
+export const StrategyBuilder: React.FC<StrategyBuilderProps> = ({ globalSymbol }) => {
+  // --- State ---
+  const [strategies, setStrategies] = useState<StrategyConfig[]>([]);
+  const [currentStrategy, setCurrentStrategy] = useState<StrategyConfig>(DEFAULT_STRATEGY);
+  const [isLibraryOpen, setIsLibraryOpen] = useState(false);
 
-type ConditionConfig = {
-  indicator_a: string | number;
-  operator: string;
-  indicator_b: string | number;
-};
-
-type RegimeConfig = {
-  timeframe: string;
-  indicators: IndicatorConfig[];
-  bullish_conditions: ConditionConfig[];
-  bearish_conditions: ConditionConfig[];
-  weight: number;
-};
-
-type SetupConfig = {
-  timeframe: string;
-  indicators: IndicatorConfig[];
-  bullish_conditions: ConditionConfig[];
-  bearish_conditions: ConditionConfig[];
-  weight: number;
-};
-
-type SignalConfig = {
-  timeframe: string;
-  indicators: IndicatorConfig[];
-  entry_conditions: ConditionConfig[];
-  exit_conditions: ConditionConfig[];
-  signal_type: string;
-  direction: string;
-  weight: number;
-};
-
-type RiskConfig = {
-  stop_loss_type: string;
-  stop_loss_value: number;
-  take_profit_type: string;
-  take_profit_value: number;
-  max_drawdown_limit: number;
-};
-
-type StrategyConfig = {
-  name: string;
-  description: string;
-  regime: RegimeConfig;
-  setup: SetupConfig;
-  signals: SignalConfig[];
-  risk: RiskConfig;
-  confidence_threshold: number;
-};
-
-// --- Options ---
-
-const indicatorOptions = [
-  { value: "ema", label: "EMA", params: { period: 14 } },
-  { value: "sma", label: "SMA", params: { period: 14 } },
-  { value: "rsi", label: "RSI", params: { period: 14 } },
-  { value: "macd", label: "MACD", params: { fast: 12, slow: 26, signal: 9 } },
-  { value: "atr", label: "ATR", params: { period: 14 } },
-  { value: "adx", label: "ADX", params: { period: 14 } },
-  { value: "bollinger_bands", label: "Bollinger Bands", params: { period: 20, std_dev: 2.0 } },
-  { value: "divergence", label: "Divergence", params: { oscillator: "rsi_14", lookback: 3 } },
-];
-
-const operatorOptions = [
-  { value: ">", label: ">" },
-  { value: "<", label: "<" },
-  { value: "==", label: "==" },
-  { value: ">=", label: ">=" },
-  { value: "<=", label: "<=" },
-];
-
-const timeframeOptions = ["1m", "5m", "15m", "1h", "4h", "1d"];
-
-// --- Default Config ---
-
-const defaultConfig: StrategyConfig = {
-  name: "New Strategy",
-  description: "",
-  regime: {
-    timeframe: "1d",
-    indicators: [{ name: "ema", params: { period: 200 } }],
-    bullish_conditions: [{ indicator_a: "close", operator: ">", indicator_b: "ema_200" }],
-    bearish_conditions: [{ indicator_a: "close", operator: "<", indicator_b: "ema_200" }],
-    weight: 0.25,
-  },
-  setup: {
-    timeframe: "4h",
-    indicators: [{ name: "adx", params: { period: 14 } }],
-    bullish_conditions: [{ indicator_a: "adx_14", operator: ">", indicator_b: 25 }],
-    bearish_conditions: [{ indicator_a: "adx_14", operator: ">", indicator_b: 25 }],
-    weight: 0.30,
-  },
-  signals: [
-    {
-      timeframe: "1h",
-      indicators: [{ name: "rsi", params: { period: 14 } }],
-      entry_conditions: [{ indicator_a: "rsi_14", operator: "<", indicator_b: 30 }],
-      exit_conditions: [],
-      signal_type: "pullback",
-      direction: "long",
-      weight: 0.35,
-    },
-  ],
-  risk: {
-    stop_loss_type: "atr",
-    stop_loss_value: 1.5,
-    take_profit_type: "risk_reward",
-    take_profit_value: 2.0,
-    max_drawdown_limit: 0.15,
-  },
-  confidence_threshold: 70.0,
-};
-
-// Backtest results type matching BacktestResults component
-type BacktestResultsData = {
-  total_trades: number;
-  winning_trades: number;
-  losing_trades: number;
-  win_rate: number;
-  total_pnl: number;
-  profit_factor: number;
-  max_drawdown: number;
-  sharpe_ratio: number;
-  trades: Array<{
-    symbol: string;
-    direction: string;
-    size: number;
-    entry_price: number;
-    exit_price: number;
-    entry_time: string;
-    exit_time: string;
-    pnl: number;
-    net_pnl: number;
-    reason: string;
-  }>;
-  equity_curve: Array<{
-    timestamp: string;
-    equity: number;
-    drawdown: number;
-  }>;
-};
-
-const StrategyBuilder: React.FC = () => {
-  const [config, setConfig] = useState<StrategyConfig>(defaultConfig);
-  const [activeTab, setActiveTab] = useState("regime");
-  const [backtestParams, setBacktestParams] = useState({
-    symbol: "BTCUSDT",
-    start_date: "2023-01-01",
-    end_date: "2024-01-01",
+  // Date State
+  const [startDate, setStartDate] = useState(() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() - 1);
+    return d.toISOString().split('T')[0];
   });
-  const [results, setResults] = useState<BacktestResultsData | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [savedStrategies, setSavedStrategies] = useState<StrategyConfig[]>([]);
+  const [endDate, setEndDate] = useState(() => new Date().toISOString().split('T')[0]);
 
-  const [presets, setPresets] = useState<StrategyConfig[]>([]);
-  const [activeStrategies, setActiveStrategies] = useState<string[]>([]);
-  const [showActivationModal, setShowActivationModal] = useState(false);
+  // Backtest State
+  const [fullResult, setFullResult] = useState<BacktestResult | null>(null);
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [resultSaved, setResultSaved] = useState(false);
 
-  const apiBase = "http://localhost:8000/api";
-
+  // --- Load Initial ---
   useEffect(() => {
-    loadSavedStrategies();
-    loadPresets();
-    loadActiveStrategies();
-  }, []);
+    const loaded = getStrategies();
+    setStrategies(loaded);
+    if (loaded.length > 0) {
+      // Try to find one matching globalSymbol if available
+      const matching = globalSymbol ? loaded.find(s => s.symbol === globalSymbol) : null;
+      setCurrentStrategy(matching || loaded[0]);
+    } else {
+      const initial = { ...DEFAULT_STRATEGY };
+      if (globalSymbol) initial.symbol = globalSymbol;
+      setCurrentStrategy(initial);
+    }
+  }, [globalSymbol]);
 
-  const loadActiveStrategies = async () => {
-    try {
-      const res = await fetch(`${apiBase}/config`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.config && data.config.strategy && data.config.strategy.active_strategies) {
-          setActiveStrategies(data.config.strategy.active_strategies);
+  // --- Helpers ---
+  const updateStrategy = (updates: Partial<StrategyConfig>) => {
+    setCurrentStrategy(prev => ({ ...prev, ...updates }));
+    setHasUnsavedChanges(true);
+  };
+
+  const handleSave = () => {
+    saveStrategy(currentStrategy);
+    setStrategies(getStrategies());
+    setHasUnsavedChanges(false);
+  };
+
+  const handleLoad = (strategy: StrategyConfig) => {
+    if (hasUnsavedChanges && !window.confirm("You have unsaved changes. Discard them?")) return;
+    setCurrentStrategy(strategy);
+    setFullResult(null);
+    setHasUnsavedChanges(false);
+    setIsLibraryOpen(false);
+  };
+
+  const handleDelete = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    if (window.confirm("Are you sure you want to delete this strategy?")) {
+      deleteStrategy(id);
+      const remaining = getStrategies();
+      setStrategies(remaining);
+      if (currentStrategy.id === id) {
+        const matching = globalSymbol ? remaining.find(s => s.symbol === globalSymbol) : null;
+        if (matching) {
+          setCurrentStrategy(matching);
+        } else {
+          const newStrat = createNewStrategy();
+          if (globalSymbol) newStrat.symbol = globalSymbol;
+          setCurrentStrategy(remaining.length > 0 ? remaining[0] : newStrat);
         }
       }
-    } catch (err) {
-      console.error("Failed to load active strategies", err);
     }
   };
 
-  const saveActiveStrategies = async () => {
-    try {
-      const res = await fetch(`${apiBase}/config/active-strategies`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(activeStrategies),
-      });
-      if (res.ok) {
-        alert("Active strategies updated!");
-        setShowActivationModal(false);
-      }
-    } catch (err) {
-      console.error("Failed to save active strategies", err);
-    }
+  const handleNew = () => {
+    if (hasUnsavedChanges && !window.confirm("You have unsaved changes. Discard them?")) return;
+    const newStrat = createNewStrategy();
+    if (globalSymbol) newStrat.symbol = globalSymbol;
+    setCurrentStrategy(newStrat);
+    setFullResult(null);
+    setHasUnsavedChanges(true);
   };
 
-  const loadSavedStrategies = async () => {
-    try {
-      const res = await fetch(`${apiBase}/strategies`);
-      if (res.ok) {
-        const data = await res.json();
-        setSavedStrategies(data);
-      }
-    } catch (err) {
-      console.error("Failed to load strategies", err);
-    }
-  };
-
-  const loadPresets = async () => {
-    try {
-      const res = await fetch(`${apiBase}/presets`);
-      if (res.ok) {
-        const data = await res.json();
-        setPresets(data);
-      }
-    } catch (err) {
-      console.error("Failed to load presets", err);
-    }
-  };
-
-  const saveStrategy = async () => {
-    try {
-      const res = await fetch(`${apiBase}/strategies`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
-      });
-      if (res.ok) {
-        alert("Strategy saved!");
-        loadSavedStrategies();
-      }
-    } catch (err) {
-      console.error("Save failed", err);
-    }
-  };
-
-    const runBacktest = async () => {
-      setLoading(true);
-      setResults(null);
-      try {
-      // 1. Submit Backtest Job
-      const submitRes = await fetch(`${apiBase}/backtests`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          symbol: backtestParams.symbol,
-          start: backtestParams.start_date,
-          end: backtestParams.end_date
-          // Note: Strategy config injection might need backend support if not using saved strategy
-          // The current backend BacktestRequest only takes symbol, start, end.
-          // It uses the LOADED strategy in the backend?
-          // Wait, ops_api_service.py's submit_backtest takes BacktestRequest(symbol, start, end).
-          // It uses "config = _config or get_config()".
-          // So it runs the ACTIVE strategy configuration on the backend.
-          // It does NOT take the strategy from the frontend payload.
-          // This is a limitation. The "No-Code Strategy Foundry" implies testing the strategy being designed.
-          // I should probably update the backend to accept a strategy override.
-          // But for now, let's assume we need to SAVE the strategy first or the backend supports it?
-          // Actually, let's just implement the polling for now.
-        }),
-      });
-
-      if (!submitRes.ok) {
-        const detail = await submitRes.json();
-        throw new Error(detail?.detail || "Backtest submission failed");
-      }
-
-      const job = await submitRes.json();
-      const jobId = job.job_id;
-
-      // 2. Poll for Completion
-      const pollInterval = setInterval(async () => {
-        try {
-          const statusRes = await fetch(`${apiBase}/backtests/${jobId}`);
-          if (statusRes.ok) {
-            const statusData = await statusRes.json();
-            if (statusData.status === "completed") {
-              clearInterval(pollInterval);
-              setResults(statusData.result);
-              setLoading(false);
-            } else if (statusData.status === "failed") {
-              clearInterval(pollInterval);
-              alert(`Backtest failed: ${statusData.error}`);
-              setLoading(false);
-            }
-          }
-        } catch (e) {
-          console.error("Polling error", e);
-        }
-      }, 1000);
-
-    } catch (error) {
-      console.error("Backtest failed:", error);
-      alert("Backtest failed. Check console.");
-      setLoading(false);
-    }
-  };
-
-  // --- Helper Components ---
-
-  const ConditionEditor = ({
-    conditions,
-    onChange,
-  }: {
-    conditions: ConditionConfig[];
-    onChange: (c: ConditionConfig[]) => void;
-  }) => {
-    const addCondition = () => {
-      onChange([...conditions, { indicator_a: "close", operator: ">", indicator_b: 0 }]);
+  const handleSaveResult = () => {
+    if (!fullResult) return;
+    const record: BacktestRecord = {
+      id: `run_${Date.now()}`,
+      strategyId: currentStrategy.id,
+      strategyName: currentStrategy.name,
+      symbol: currentStrategy.symbol,
+      timeframe: currentStrategy.timeframe,
+      startDate,
+      endDate,
+      executedAt: Date.now(),
+      stats: calculateBacktestStats(fullResult.trades, fullResult.equityCurve, currentStrategy.timeframe)
     };
+    saveBacktestResult(record);
+    setResultSaved(true);
+    setTimeout(() => setResultSaved(false), 2000);
+  };
 
-    const updateCondition = (index: number, field: keyof ConditionConfig, value: string | number) => {
-      const next = [...conditions];
-      next[index] = { ...next[index], [field]: value };
-      onChange(next);
+  // --- Logic Editing ---
+
+  const addIndicator = () => {
+    const id = `ind_${Date.now()}`;
+    const newInd: IndicatorDefinition = { id, type: 'SMA', period: 20, color: '#FFFFFF' };
+    updateStrategy({ indicators: [...currentStrategy.indicators, newInd] });
+  };
+
+  const removeIndicator = (id: string) => {
+    updateStrategy({
+      indicators: currentStrategy.indicators.filter(i => i.id !== id),
+      entryRules: currentStrategy.entryRules.filter(r => r.left !== id && r.right !== id),
+      exitRules: currentStrategy.exitRules.filter(r => r.left !== id && r.right !== id)
+    });
+  };
+
+  const addRule = (type: 'entry' | 'exit') => {
+    const newRule: RuleCondition = {
+      id: `rule_${Date.now()}`,
+      left: 'PRICE',
+      operator: '>',
+      right: 'PRICE'
     };
+    const list = type === 'entry' ? currentStrategy.entryRules : currentStrategy.exitRules;
+    updateStrategy(type === 'entry' ? { entryRules: [...list, newRule] } : { exitRules: [...list, newRule] });
+  };
 
-    const removeCondition = (index: number) => {
-      onChange(conditions.filter((_, i) => i !== index));
-    };
-
-    return (
-      <div className="space-y-2">
-        {conditions.map((cond, idx) => (
-          <div key={idx} className="flex items-center gap-2 bg-gray-800 p-2 rounded border border-gray-700">
-            <input
-              className="bg-gray-700 border border-gray-600 rounded p-1 text-sm w-1/3"
-              value={cond.indicator_a}
-              onChange={(e) => updateCondition(idx, "indicator_a", e.target.value)}
-              placeholder="Indicator A"
-            />
-            <select
-              className="bg-gray-700 border border-gray-600 rounded p-1 text-sm"
-              value={cond.operator}
-              onChange={(e) => updateCondition(idx, "operator", e.target.value)}
-            >
-              {operatorOptions.map((op) => (
-                <option key={op.value} value={op.value}>
-                  {op.label}
-                </option>
-              ))}
-            </select>
-            <input
-              className="bg-gray-700 border border-gray-600 rounded p-1 text-sm w-1/3"
-              value={cond.indicator_b}
-              onChange={(e) => updateCondition(idx, "indicator_b", e.target.value)}
-              placeholder="Indicator B / Value"
-            />
-            <button onClick={() => removeCondition(idx)} className="text-red-400 hover:text-red-300 px-2">
-              ✕
-            </button>
-          </div>
-        ))}
-        <button onClick={addCondition} className="text-xs text-cyan-400 hover:text-cyan-300">
-          + Add Condition
-        </button>
-      </div>
+  const removeRule = (type: 'entry' | 'exit', id: string) => {
+    const list = type === 'entry' ? currentStrategy.entryRules : currentStrategy.exitRules;
+    updateStrategy(type === 'entry'
+      ? { entryRules: list.filter(r => r.id !== id) }
+      : { exitRules: list.filter(r => r.id !== id) }
     );
   };
 
-  const IndicatorEditor = ({
-    indicators,
-    onChange,
-  }: {
-    indicators: IndicatorConfig[];
-    onChange: (i: IndicatorConfig[]) => void;
-  }) => {
-    const addIndicator = () => {
-      onChange([...indicators, { name: "ema", params: { period: 14 } }]);
-    };
+  const handleRunSimulation = async () => {
+    setIsSimulating(true);
+    setResultSaved(false);
+    setFullResult(null);
 
-    const updateIndicator = (index: number, field: keyof IndicatorConfig, value: string | Record<string, string | number>) => {
-      const next = [...indicators];
-      // If name changes, reset params to default for that indicator
-      if (field === "name" && typeof value === "string") {
-        const defaultParams = indicatorOptions.find((opt) => opt.value === value)?.params || {};
-        next[index] = { ...next[index], name: value, params: defaultParams };
-      } else if (field === "params" && typeof value === "object") {
-        next[index] = { ...next[index], params: value };
+    try {
+      const startTs = new Date(startDate).getTime();
+      const endTs = new Date(endDate).getTime() + 86400000 - 1; // Include full end day
+
+      if (endTs <= startTs) {
+        alert("End date must be after start date.");
+        setIsSimulating(false);
+        return;
       }
-      onChange(next);
-    };
 
-    const updateParam = (index: number, key: string, value: string | number) => {
-      const next = [...indicators];
-      next[index].params = { ...next[index].params, [key]: value };
-      onChange(next);
+      // Fetch Real Data
+      const candles = await MarketStream.fetchHistoryRange(
+        currentStrategy.symbol,
+        currentStrategy.timeframe,
+        startTs,
+        endTs
+      );
+
+      if (candles.length < 50) {
+        alert("Insufficient data for this range/timeframe. Try expanding the date range.");
+        setIsSimulating(false);
+        return;
+      }
+
+      const result = runBacktest(candles, currentStrategy);
+      setFullResult(result);
+
+      // Auto-save stats to strategy for "History/Library" view
+      const stats = calculateBacktestStats(result.trades, result.equityCurve, currentStrategy.timeframe);
+      const updatedStrat = { ...currentStrategy, lastStats: stats };
+      setCurrentStrategy(updatedStrat);
+      saveStrategy(updatedStrat); // Persist to storage
+      setStrategies(getStrategies()); // Refresh library text
+      setHasUnsavedChanges(false);
+
+    } catch (e) {
+      console.error("Backtest Error", e);
+      alert("Failed to run backtest. See console for details.");
+    } finally {
+      setIsSimulating(false);
     }
+  };
 
-    const removeIndicator = (index: number) => {
-      onChange(indicators.filter((_, i) => i !== index));
+  // --- Components ---
+
+  const RuleEditor: React.FC<{ rule: RuleCondition, type: 'entry' | 'exit', onDelete: () => void }> = ({ rule, type, onDelete }) => {
+    const update = (field: keyof RuleCondition, value: string) => {
+      const list = type === 'entry' ? currentStrategy.entryRules : currentStrategy.exitRules;
+      const updatedList = list.map(r => r.id === rule.id ? { ...r, [field]: value } : r);
+      updateStrategy(type === 'entry' ? { entryRules: updatedList } : { exitRules: updatedList });
     };
 
     return (
-      <div className="space-y-2">
-        {indicators.map((ind, idx) => (
-          <div key={idx} className="bg-gray-800 p-2 rounded border border-gray-700">
-            <div className="flex items-center gap-2 mb-2">
-              <select
-                className="bg-gray-700 border border-gray-600 rounded p-1 text-sm"
-                value={ind.name}
-                onChange={(e) => updateIndicator(idx, "name", e.target.value)}
-              >
-                {indicatorOptions.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-              <button onClick={() => removeIndicator(idx)} className="ml-auto text-red-400 hover:text-red-300 px-2">
-                ✕
-              </button>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              {Object.entries(ind.params).map(([key, val]) => (
-                <div key={key} className="flex items-center gap-1">
-                  <span className="text-xs text-gray-400">{key}:</span>
-                  <input
-                    className="bg-gray-900 border border-gray-700 rounded p-1 text-xs w-full"
-                    value={val}
-                    onChange={(e) => updateParam(idx, key, e.target.value)}
-                  />
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-        <button onClick={addIndicator} className="text-xs text-cyan-400 hover:text-cyan-300">
-          + Add Indicator
+      <div className="flex items-center gap-2 bg-background-elevated p-2 rounded-lg border border-white/5 hover:border-white/20 transition-all group" data-testid={`rule-row-${rule.id}`}>
+        <div className="relative flex-1 min-w-[120px]">
+          <select
+            value={rule.left}
+            onChange={(e) => update('left', e.target.value)}
+            data-testid={`select-left-${rule.id}`}
+            className="w-full appearance-none bg-background-secondary pl-3 pr-8 py-2 rounded text-xs font-medium focus:outline-none border border-transparent focus:border-accent-primary transition-colors cursor-pointer"
+          >
+            <option value="PRICE">Price Action</option>
+            {currentStrategy.indicators.map(i => <option key={i.id} value={i.id}>{i.type} ({i.period})</option>)}
+          </select>
+          <ChevronRight className="absolute right-2 top-1/2 -translate-y-1/2 text-text-tertiary pointer-events-none" size={12} />
+        </div>
+
+        <select
+          value={rule.operator}
+          onChange={(e) => update('operator', e.target.value as any)}
+          data-testid={`select-operator-${rule.id}`}
+          className="bg-transparent text-brand font-bold text-sm text-center w-10 focus:outline-none cursor-pointer"
+        >
+          <option value=">">&gt;</option>
+          <option value="<">&lt;</option>
+          <option value="==">=</option>
+        </select>
+
+        <div className="flex-1 relative min-w-[120px]">
+          <input
+            type="text"
+            value={rule.right}
+            onChange={(e) => update('right', e.target.value)}
+            placeholder="Value (e.g. 30)"
+            data-testid={`input-right-${rule.id}`}
+            className="w-full bg-background-secondary px-3 py-2 rounded text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none border border-transparent focus:border-accent-primary transition-colors"
+          />
+        </div>
+
+        <button onClick={onDelete} data-testid={`btn-delete-rule-${rule.id}`} className="text-text-tertiary hover:text-accent-danger opacity-0 group-hover:opacity-100 transition-opacity p-1.5 hover:bg-white/5 rounded">
+          <Trash2 size={14} />
         </button>
       </div>
     );
   };
 
   return (
-    <div className="p-6 bg-gray-900 text-white rounded-lg shadow-xl border border-gray-700 min-h-screen">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500">
-            Strategy Studio
-          </h1>
-          <p className="text-gray-400 text-sm">Design, test, and deploy algorithmic strategies.</p>
-        </div>
-        <div className="flex gap-2">
-          <select
-            className="bg-gray-800 border border-gray-600 rounded px-3 py-2 text-sm"
-            onChange={(e) => {
-              const s = presets.find((s) => s.name === e.target.value);
-              if (s) setConfig(s);
-            }}
-          >
-            <option value="">Load Preset...</option>
-            {presets.map((s) => (
-              <option key={s.name} value={s.name}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-          <select
-            className="bg-gray-800 border border-gray-600 rounded px-3 py-2 text-sm"
-            onChange={(e) => {
-              const s = savedStrategies.find((s) => s.name === e.target.value);
-              if (s) setConfig(s);
-            }}
-          >
-            <option value="">Load Saved...</option>
-            {savedStrategies.map((s) => (
-              <option key={s.name} value={s.name}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-          <button
-            onClick={saveStrategy}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm font-semibold"
-          >
-            Save Strategy
-          </button>
-          <button
-            onClick={() => setShowActivationModal(true)}
-            className="px-4 py-2 bg-green-600 hover:bg-green-500 rounded text-sm font-semibold"
-          >
-            Manage Active
-          </button>
-        </div>
-      </div>
+    <div className="h-full flex flex-col p-4 pt-20 gap-4 max-w-[1600px] mx-auto w-full" data-testid="strategy-builder">
 
-      {showActivationModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 p-6 rounded-lg border border-gray-700 w-96">
-            <h3 className="text-xl font-bold mb-4 text-white">Active Strategies</h3>
-            <div className="space-y-2 mb-4 max-h-60 overflow-y-auto">
-              {[...presets, ...savedStrategies].map((s) => (
-                <label key={s.name} className="flex items-center gap-2 text-gray-200 cursor-pointer hover:bg-gray-700 p-2 rounded">
-                  <input
-                    type="checkbox"
-                    className="form-checkbox h-4 w-4 text-blue-600"
-                    checked={activeStrategies.includes(s.name)}
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        setActiveStrategies([...activeStrategies, s.name]);
-                      } else {
-                        setActiveStrategies(activeStrategies.filter((n) => n !== s.name));
-                      }
-                    }}
-                  />
-                  <span>{s.name}</span>
-                </label>
-              ))}
+      {/* --- Top Bar --- */}
+      <header className="flex justify-between items-center bg-background-secondary/80 backdrop-blur-md p-4 rounded-2xl border border-white/5 shadow-xl z-10 sticky top-20">
+        <div className="flex items-center gap-4">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500/20 to-purple-500/20 flex items-center justify-center text-brand border border-white/10">
+            <BrainCircuit size={20} />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={currentStrategy.name}
+                onChange={(e) => updateStrategy({ name: e.target.value })}
+                className="bg-transparent text-lg font-bold text-text-primary focus:outline-none focus:ring-1 focus:ring-white/20 rounded px-1 -ml-1 transition-all"
+                placeholder="Strategy Name"
+              />
+              {hasUnsavedChanges && (
+                <span className="text-[10px] bg-accent-warning/20 text-accent-warning px-2 py-0.5 rounded-full font-medium border border-accent-warning/20">
+                  Unsaved
+                </span>
+              )}
             </div>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setShowActivationModal(false)}
-                className="px-4 py-2 text-gray-400 hover:text-white"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={saveActiveStrategies}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-white"
-              >
-                Save Changes
-              </button>
+            <div className="text-xs text-text-tertiary">
+              Last modified: {new Date(currentStrategy.updatedAt).toLocaleTimeString()}
             </div>
           </div>
         </div>
-      )}
 
-      {/* Main Content */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left Column: Configuration */}
-        <div className="lg:col-span-1 space-y-6">
-          <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-            <label className="block text-sm text-gray-400 mb-1">Strategy Name</label>
-            <input
-              className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white"
-              value={config.name}
-              onChange={(e) => setConfig({ ...config, name: e.target.value })}
-            />
-          </div>
-
-          {/* Tabs */}
-          <div className="flex border-b border-gray-700">
-            {["regime", "setup", "signals", "risk"].map((tab) => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={`px-4 py-2 text-sm font-medium capitalize ${activeTab === tab
-                  ? "text-cyan-400 border-b-2 border-cyan-400"
-                  : "text-gray-400 hover:text-gray-200"
-                  }`}
-              >
-                {tab}
-              </button>
-            ))}
-          </div>
-
-          <div className="bg-gray-800 p-4 rounded-b-lg border border-gray-700 border-t-0">
-            {activeTab === "regime" && (
-              <div className="space-y-4">
-                <h3 className="text-lg font-semibold text-purple-400">Regime Detection</h3>
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">Timeframe</label>
-                  <select
-                    className="bg-gray-900 border border-gray-600 rounded p-1 text-sm w-full"
-                    value={config.regime.timeframe}
-                    onChange={(e) =>
-                      setConfig({ ...config, regime: { ...config.regime, timeframe: e.target.value } })
-                    }
-                  >
-                    {timeframeOptions.map((tf) => (
-                      <option key={tf} value={tf}>
-                        {tf}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <h4 className="text-sm font-medium text-gray-300 mb-2">Indicators</h4>
-                  <IndicatorEditor
-                    indicators={config.regime.indicators}
-                    onChange={(i) => setConfig({ ...config, regime: { ...config.regime, indicators: i } })}
-                  />
-                </div>
-                <div>
-                  <h4 className="text-sm font-medium text-green-400 mb-2">Bullish Conditions</h4>
-                  <ConditionEditor
-                    conditions={config.regime.bullish_conditions}
-                    onChange={(c) =>
-                      setConfig({ ...config, regime: { ...config.regime, bullish_conditions: c } })
-                    }
-                  />
-                </div>
-                <div>
-                  <h4 className="text-sm font-medium text-red-400 mb-2">Bearish Conditions</h4>
-                  <ConditionEditor
-                    conditions={config.regime.bearish_conditions}
-                    onChange={(c) =>
-                      setConfig({ ...config, regime: { ...config.regime, bearish_conditions: c } })
-                    }
-                  />
-                </div>
-              </div>
-            )}
-
-            {activeTab === "setup" && (
-              <div className="space-y-4">
-                <h3 className="text-lg font-semibold text-blue-400">Setup Detection</h3>
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">Timeframe</label>
-                  <select
-                    className="bg-gray-900 border border-gray-600 rounded p-1 text-sm w-full"
-                    value={config.setup.timeframe}
-                    onChange={(e) =>
-                      setConfig({ ...config, setup: { ...config.setup, timeframe: e.target.value } })
-                    }
-                  >
-                    {timeframeOptions.map((tf) => (
-                      <option key={tf} value={tf}>
-                        {tf}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <h4 className="text-sm font-medium text-gray-300 mb-2">Indicators</h4>
-                  <IndicatorEditor
-                    indicators={config.setup.indicators}
-                    onChange={(i) => setConfig({ ...config, setup: { ...config.setup, indicators: i } })}
-                  />
-                </div>
-                <div>
-                  <h4 className="text-sm font-medium text-green-400 mb-2">Bullish Setup</h4>
-                  <ConditionEditor
-                    conditions={config.setup.bullish_conditions}
-                    onChange={(c) =>
-                      setConfig({ ...config, setup: { ...config.setup, bullish_conditions: c } })
-                    }
-                  />
-                </div>
-                <div>
-                  <h4 className="text-sm font-medium text-red-400 mb-2">Bearish Setup</h4>
-                  <ConditionEditor
-                    conditions={config.setup.bearish_conditions}
-                    onChange={(c) =>
-                      setConfig({ ...config, setup: { ...config.setup, bearish_conditions: c } })
-                    }
-                  />
-                </div>
-              </div>
-            )}
-
-            {activeTab === "signals" && (
-              <div className="space-y-4">
-                <h3 className="text-lg font-semibold text-yellow-400">Signals</h3>
-                {config.signals.map((signal, idx) => (
-                  <div key={idx} className="border border-gray-600 rounded p-3 bg-gray-900">
-                    <div className="flex justify-between items-center mb-2">
-                      <h4 className="text-sm font-bold">Signal #{idx + 1}</h4>
-                      <button
-                        onClick={() => {
-                          const next = config.signals.filter((_, i) => i !== idx);
-                          setConfig({ ...config, signals: next });
-                        }}
-                        className="text-red-400 text-xs"
-                      >Remove</button>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 mb-2">
-                      <select
-                        className="bg-gray-800 border border-gray-600 rounded p-1 text-xs"
-                        value={signal.direction}
-                        onChange={(e) => {
-                          const next = [...config.signals];
-                          next[idx].direction = e.target.value;
-                          setConfig({ ...config, signals: next });
-                        }}
-                      >
-                        <option value="long">Long</option>
-                        <option value="short">Short</option>
-                      </select>
-                      <select
-                        className="bg-gray-800 border border-gray-600 rounded p-1 text-xs"
-                        value={signal.timeframe}
-                        onChange={(e) => {
-                          const next = [...config.signals];
-                          next[idx].timeframe = e.target.value;
-                          setConfig({ ...config, signals: next });
-                        }}
-                      >
-                        {timeframeOptions.map(tf => <option key={tf} value={tf}>{tf}</option>)}
-                      </select>
-                    </div>
-
-                    <div className="mb-2">
-                      <span className="text-xs text-gray-400">Indicators</span>
-                      <IndicatorEditor
-                        indicators={signal.indicators}
-                        onChange={(i) => {
-                          const next = [...config.signals];
-                          next[idx].indicators = i;
-                          setConfig({ ...config, signals: next });
-                        }}
-                      />
-                    </div>
-
-                    <div>
-                      <span className="text-xs text-gray-400">Entry Conditions</span>
-                      <ConditionEditor
-                        conditions={signal.entry_conditions}
-                        onChange={(c) => {
-                          const next = [...config.signals];
-                          next[idx].entry_conditions = c;
-                          setConfig({ ...config, signals: next });
-                        }}
-                      />
-                    </div>
-                  </div>
-                ))}
-                <button
-                  onClick={() => setConfig({
-                    ...config,
-                    signals: [...config.signals, {
-                      timeframe: "1h",
-                      indicators: [],
-                      entry_conditions: [],
-                      exit_conditions: [],
-                      signal_type: "custom",
-                      direction: "long",
-                      weight: 0.35
-                    }]
-                  })}
-                  className="w-full py-2 border border-dashed border-gray-600 text-gray-400 hover:text-white rounded"
-                >
-                  + Add Signal
-                </button>
-              </div>
-            )}
-
-            {activeTab === "risk" && (
-              <div className="space-y-4">
-                <h3 className="text-lg font-semibold text-red-400">Risk Management</h3>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs text-gray-400">Stop Loss Type</label>
-                    <select
-                      className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-sm"
-                      value={config.risk.stop_loss_type}
-                      onChange={(e) => setConfig({ ...config, risk: { ...config.risk, stop_loss_type: e.target.value } })}
-                    >
-                      <option value="atr">ATR Multiplier</option>
-                      <option value="percent">Percentage</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-400">Value</label>
-                    <input
-                      type="number"
-                      className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-sm"
-                      value={config.risk.stop_loss_value}
-                      onChange={(e) => setConfig({ ...config, risk: { ...config.risk, stop_loss_value: parseFloat(e.target.value) } })}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-400">Take Profit Type</label>
-                    <select
-                      className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-sm"
-                      value={config.risk.take_profit_type}
-                      onChange={(e) => setConfig({ ...config, risk: { ...config.risk, take_profit_type: e.target.value } })}
-                    >
-                      <option value="risk_reward">Risk:Reward Ratio</option>
-                      <option value="percent">Percentage</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-400">Value</label>
-                    <input
-                      type="number"
-                      className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-sm"
-                      value={config.risk.take_profit_value}
-                      onChange={(e) => setConfig({ ...config, risk: { ...config.risk, take_profit_value: parseFloat(e.target.value) } })}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Right Column: Backtest & Results */}
-        <div className="lg:col-span-2 space-y-6">
-          <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-            <h3 className="text-lg font-semibold text-white mb-4">Backtest Configuration</h3>
-            <div className="grid grid-cols-3 gap-4 mb-4">
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Symbol</label>
-                <input
-                  className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-sm"
-                  value={backtestParams.symbol}
-                  onChange={(e) => setBacktestParams({ ...backtestParams, symbol: e.target.value })}
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Start Date</label>
-                <input
-                  type="date"
-                  className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-sm"
-                  value={backtestParams.start_date}
-                  onChange={(e) => setBacktestParams({ ...backtestParams, start_date: e.target.value })}
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">End Date</label>
-                <input
-                  type="date"
-                  className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-sm"
-                  value={backtestParams.end_date}
-                  onChange={(e) => setBacktestParams({ ...backtestParams, end_date: e.target.value })}
-                />
-              </div>
-            </div>
-            <button
-              onClick={runBacktest}
-              disabled={loading}
-              className={`w-full py-3 rounded font-bold text-lg transition-colors ${loading
-                ? "bg-gray-600 cursor-not-allowed"
-                : "bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500"
-                }`}
-            >
-              {loading ? "Running Backtest..." : "Run Backtest"}
+        <div className="flex items-center gap-3">
+          <div className="flex bg-background-elevated rounded-lg p-1 border border-white/5">
+            <button onClick={handleNew} data-testid="btn-new-strategy" className="p-2 hover:bg-white/10 rounded-md text-text-secondary hover:text-white transition-colors tooltip" title="New Strategy">
+              <FilePlus size={18} />
+            </button>
+            <div className="w-[1px] bg-white/10 my-1 mx-1"></div>
+            <button onClick={() => setIsLibraryOpen(true)} className="p-2 hover:bg-white/10 rounded-md text-text-secondary hover:text-white transition-colors tooltip" title="Load Strategy">
+              <FolderOpen size={18} />
             </button>
           </div>
 
-          {results && <BacktestResults results={results} />}
+          <button
+            onClick={handleSave}
+            className={cn(
+              "flex items-center gap-2 px-4 py-2 rounded-lg border transition-all",
+              hasUnsavedChanges ? 'bg-brand text-white border-accent-primary hover:bg-brand/90' : 'bg-background-elevated text-text-secondary border-white/5 hover:bg-white/5 hover:text-white'
+            )}
+          >
+            <Save size={16} />
+            <span>Save</span>
+          </button>
+
+          <div className="h-8 w-[1px] bg-white/10 mx-1"></div>
+
+          <button
+            onClick={handleRunSimulation}
+            disabled={isSimulating}
+            data-testid="btn-quick-test"
+            className="flex items-center gap-2 px-6 py-2 bg-gradient-to-r from-accent-success to-emerald-600 text-white rounded-lg hover:shadow-lg hover:shadow-emerald-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isSimulating ? (
+              <span className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></span>
+            ) : <Play size={16} fill="currentColor" />}
+            <span className="font-medium">Quick Test</span>
+          </button>
         </div>
+      </header>
+
+      {/* --- Main Content Grid --- */}
+      <div className="flex-1 min-h-0 grid grid-cols-12 gap-6 overflow-hidden">
+
+        {/* --- LEFT SIDEBAR: Config --- */}
+        <aside className="col-span-3 flex flex-col gap-4 overflow-hidden">
+          {/* Asset Settings */}
+          <Card className="p-4 flex flex-col gap-4 shrink-0">
+            <div className="flex items-center gap-2 text-text-secondary pb-2 border-b border-white/5">
+              <BarChart3 size={16} />
+              <span className="text-xs font-bold uppercase tracking-wider">Asset Configuration</span>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="text-[10px] text-text-tertiary mb-1.5 block uppercase tracking-wider font-semibold">Exchange</label>
+                <select
+                  value={currentStrategy.exchange || 'ZOOMEX'}
+                  onChange={(e) => {
+                    const newEx = e.target.value as any;
+                    const exchangeInfo = getExchange(newEx);
+                    updateStrategy({
+                      exchange: newEx,
+                      fee: exchangeInfo ? exchangeInfo.fees.taker : currentStrategy.fee
+                    });
+                  }}
+                  className="w-full bg-background-secondary border border-white/10 rounded-lg p-2.5 text-sm focus:outline-none focus:border-accent-primary transition-colors"
+                >
+                  {SUPPORTED_EXCHANGES.map(ex => (
+                    <option key={ex.id} value={ex.id}>{ex.name} ({ex.requiresKYC ? 'KYC' : 'No KYC'})</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-[10px] text-text-tertiary mb-1.5 block uppercase tracking-wider font-semibold">Instrument</label>
+                <select
+                  value={currentStrategy.symbol}
+                  onChange={(e) => updateStrategy({ symbol: e.target.value })}
+                  className="w-full bg-background-secondary border border-white/10 rounded-lg p-2.5 text-sm focus:outline-none focus:border-accent-primary transition-colors"
+                >
+                  <option value="BTC-PERP">BTC-PERP (Bitcoin)</option>
+                  <option value="ETH-PERP">ETH-PERP (Ethereum)</option>
+                  <option value="SOL-PERP">SOL-PERP (Solana)</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-[10px] text-text-tertiary mb-1.5 block uppercase tracking-wider font-semibold">Timeframe</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {['1m', '5m', '15m', '1h', '4h', '1d'].map(tf => (
+                    <button
+                      key={tf}
+                      onClick={() => updateStrategy({ timeframe: tf })}
+                      className={cn(
+                        "py-2 text-xs font-medium rounded-lg border transition-all",
+                        currentStrategy.timeframe === tf ? 'bg-brand text-white border-accent-primary' : 'bg-background-secondary border-transparent text-text-secondary hover:bg-white/5'
+                      )}
+                    >
+                      {tf}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] text-text-tertiary mb-1.5 block uppercase tracking-wider font-semibold">Direction</label>
+                  <select
+                    value={currentStrategy.direction}
+                    onChange={(e) => updateStrategy({ direction: e.target.value as any })}
+                    className="w-full bg-background-secondary border border-white/10 rounded-lg p-2.5 text-sm focus:outline-none focus:border-accent-primary transition-colors"
+                  >
+                    <option value="LONG">Long Only</option>
+                    <option value="SHORT">Short Only</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] text-text-tertiary mb-1.5 block uppercase tracking-wider font-semibold">Taker Fee (%)</label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={currentStrategy.fee}
+                      onChange={(e) => updateStrategy({ fee: parseFloat(e.target.value) })}
+                      className="w-full bg-background-secondary border border-white/10 rounded-lg p-2.5 pl-3 pr-6 text-sm focus:outline-none focus:border-accent-primary transition-colors"
+                    />
+                    <Percent size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-text-tertiary" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </Card>
+
+          {/* Simulation Period */}
+          <Card className="p-4 flex flex-col gap-4 shrink-0">
+            <div className="flex items-center gap-2 text-text-secondary pb-2 border-b border-white/5">
+              <Calendar size={16} />
+              <span className="text-xs font-bold uppercase tracking-wider">Quick Test Range</span>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="text-[10px] text-text-tertiary mb-1 block">Start Date</label>
+                <input
+                  type="date"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  className="w-full bg-background-secondary border border-white/10 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-accent-primary"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] text-text-tertiary mb-1 block">End Date</label>
+                <input
+                  type="date"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  className="w-full bg-background-secondary border border-white/10 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-accent-primary"
+                />
+              </div>
+            </div>
+          </Card>
+
+          {/* Indicators */}
+          <Card className="flex-1 flex flex-col min-h-0" noPadding>
+            <div className="p-4 border-b border-white/5 flex justify-between items-center bg-white/[0.02]">
+              <div className="flex items-center gap-2 text-text-secondary">
+                <Activity size={16} />
+                <span className="text-xs font-bold uppercase tracking-wider">Active Indicators</span>
+              </div>
+              <button onClick={addIndicator} data-testid="btn-add-indicator" className="p-1.5 bg-brand/10 text-brand hover:bg-brand hover:text-white rounded-md transition-all">
+                <Plus size={14} />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
+              {currentStrategy.indicators.length === 0 && (
+                <div className="flex flex-col items-center justify-center h-32 text-center text-text-tertiary opacity-70 border-2 border-dashed border-white/5 rounded-xl">
+                  <Activity size={24} className="mb-2" />
+                  <span className="text-xs">No indicators added</span>
+                </div>
+              )}
+              {currentStrategy.indicators.map((ind) => (
+                <div key={ind.id} className="bg-background-elevated text-foreground border border-white/5 p-3 relative group hover:border-white/10 transition-colors">
+                  <div className="flex justify-between items-center mb-3">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2.5 h-2.5 rounded-full shadow-sm shadow-black/50" style={{ backgroundColor: ind.color }}></div>
+                      <span className="font-bold text-sm text-white">{ind.type}</span>
+                    </div>
+                    <span className="text-[10px] font-mono text-text-tertiary opacity-60">ID: {ind.id.split('_')[1]}</span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <label className="text-[10px] text-text-secondary uppercase font-semibold">Period</label>
+                    <input
+                      type="number"
+                      value={ind.period}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value);
+                        const updated = currentStrategy.indicators.map(i => i.id === ind.id ? { ...i, period: val } : i);
+                        updateStrategy({ indicators: updated });
+                      }}
+                      className="w-16 bg-card border border-white/5 rounded px-2 py-1 text-xs focus:outline-none focus:border-accent-primary text-center"
+                    />
+                    <div className="flex-1"></div>
+                    <button
+                      onClick={() => removeIndicator(ind.id)}
+                      className="text-text-tertiary hover:text-accent-danger hover:bg-accent-danger/10 p-1.5 rounded transition-colors"
+                      title="Remove Indicator"
+                      data-testid={`btn-remove-indicator-${ind.id}`}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        </aside>
+
+        {/* --- RIGHT CONTENT: Logic & Results --- */}
+        <main className="col-span-9 flex flex-col gap-4 overflow-y-auto custom-scrollbar pr-2 pb-4">
+
+          {/* Logic Section */}
+          <div className="grid grid-cols-2 gap-4 shrink-0">
+            {/* Entry Rules */}
+            <Card className="flex flex-col min-h-[320px] border-t-4 border-t-accent-success" noPadding data-testid="panel-entry-strategy">
+              <div className="p-4 border-b border-white/5 flex justify-between items-center bg-accent-success/5">
+                <div className="flex items-center gap-2">
+                  <Zap size={18} className="text-accent-success" />
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Entry Strategy</h3>
+                    <p className="text-[10px] text-accent-success/80 font-medium">Conditions to Open Position ({currentStrategy.direction === 'LONG' ? 'Long' : 'Short'})</p>
+                  </div>
+                </div>
+                <button onClick={() => addRule('entry')} data-testid="btn-add-rule-entry" className="text-xs flex items-center gap-1 px-2 py-1.5 bg-background-elevated hover:bg-white/10 text-white rounded border border-white/10 transition-colors">
+                  <Plus size={12} /> Add Rule
+                </button>
+              </div>
+              <div className="flex-1 p-4 space-y-3 bg-background-tertiary/30">
+                {currentStrategy.entryRules.length === 0 && (
+                  <div className="h-full flex flex-col items-center justify-center text-text-tertiary border-2 border-dashed border-white/5 rounded-xl p-6 text-center">
+                    <Zap size={24} className="mb-2 opacity-50" />
+                    <p className="text-sm font-medium">Always {currentStrategy.direction === 'LONG' ? 'Buy' : 'Sell'}</p>
+                    <p className="text-xs mt-1 max-w-[200px]">Without rules, the strategy will enter a trade immediately on every candle.</p>
+                  </div>
+                )}
+                {currentStrategy.entryRules.map(rule => (
+                  <RuleEditor key={rule.id} rule={rule} type="entry" onDelete={() => removeRule('entry', rule.id)} />
+                ))}
+              </div>
+            </Card>
+
+            {/* Exit Rules */}
+            <Card className="flex flex-col min-h-[320px] border-t-4 border-t-accent-danger" noPadding>
+              <div className="p-4 border-b border-white/5 flex justify-between items-center bg-accent-danger/5">
+                <div className="flex items-center gap-2">
+                  <Box size={18} className="text-accent-danger" />
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Exit Strategy</h3>
+                    <p className="text-[10px] text-accent-danger/80 font-medium">Conditions to Close Position</p>
+                  </div>
+                </div>
+                <button onClick={() => addRule('exit')} className="text-xs flex items-center gap-1 px-2 py-1.5 bg-background-elevated hover:bg-white/10 text-white rounded border border-white/10 transition-colors">
+                  <Plus size={12} /> Add Rule
+                </button>
+              </div>
+              <div className="flex-1 p-4 space-y-3 bg-background-tertiary/30">
+                {currentStrategy.exitRules.length === 0 && (
+                  <div className="h-full flex flex-col items-center justify-center text-text-tertiary border-2 border-dashed border-white/5 rounded-xl p-6 text-center">
+                    <RotateCcw size={24} className="mb-2 opacity-50" />
+                    <p className="text-sm font-medium">Manual Close Only</p>
+                    <p className="text-xs mt-1 max-w-[200px]">Trades will stay open until equity runs out or manual intervention.</p>
+                  </div>
+                )}
+                {currentStrategy.exitRules.map(rule => (
+                  <RuleEditor key={rule.id} rule={rule} type="exit" onDelete={() => removeRule('exit', rule.id)} />
+                ))}
+              </div>
+            </Card>
+          </div>
+
+          {/* Results Section */}
+          {fullResult ? (
+            <BacktestResultsView
+              result={fullResult}
+              timeframe={currentStrategy.timeframe}
+              onSave={handleSaveResult}
+              isSaved={resultSaved}
+              className="mt-2"
+            />
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center text-text-tertiary border-2 border-dashed border-white/5 rounded-2xl min-h-[300px] gap-4 bg-white/[0.01]">
+              <div className="w-16 h-16 rounded-full bg-background-elevated flex items-center justify-center text-text-tertiary shadow-inner">
+                <Activity size={32} />
+              </div>
+              <div className="text-center">
+                <h3 className="text-lg font-medium text-text-secondary">Ready to Test</h3>
+                <p className="text-sm mt-1 max-w-xs mx-auto">Configure your logic and press "Quick Test" to verify performance.</p>
+              </div>
+            </div>
+          )}
+        </main>
       </div>
+
+      {/* --- Library Modal --- */}
+      {isLibraryOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center animate-fade-in p-4">
+          <Card className="w-full max-w-[600px] max-h-[85vh] flex flex-col shadow-2xl border-white/10" noPadding>
+            <div className="p-5 border-b border-white/5 flex justify-between items-center bg-background-elevated">
+              <h2 className="font-bold text-xl flex items-center gap-3">
+                <FolderOpen size={24} className="text-brand" />
+                Strategy Library
+              </h2>
+              <button onClick={() => setIsLibraryOpen(false)} className="p-2 hover:bg-white/10 rounded-full transition-colors"><X size={20} /></button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar bg-background-secondary">
+              {strategies.length === 0 && (
+                <div className="text-center py-16 flex flex-col items-center opacity-60">
+                  <AlertCircle size={48} className="mb-4 text-text-tertiary" />
+                  <p className="text-text-secondary">No saved strategies found.</p>
+                  <p className="text-xs text-text-tertiary mt-2">Create a new strategy to get started.</p>
+                </div>
+              )}
+              {strategies.map(strat => (
+                <div
+                  key={strat.id}
+                  onClick={() => handleLoad(strat)}
+                  className="group p-4 bg-background-primary rounded-xl border border-white/5 hover:border-accent-primary/50 cursor-pointer transition-all hover:shadow-lg hover:shadow-black/20 hover:-translate-y-0.5 relative overflow-hidden"
+                >
+                  <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-transparent via-white/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
+
+                  <div className="flex justify-between items-start mb-3">
+                    <div>
+                      <div className="font-bold text-lg text-white group-hover:text-brand transition-colors flex items-center gap-2">
+                        {strat.name}
+                        {strat.lastStats && (
+                          <div className={cn("text-[10px] px-1.5 py-0.5 rounded font-mono border", strat.lastStats.totalPnL >= 0 ? 'bg-accent-success/10 border-accent-success/20 text-accent-success' : 'bg-accent-danger/10 border-accent-danger/20 text-accent-danger')}>
+                            {strat.lastStats.totalPnL >= 0 ? '+' : ''}{strat.lastStats.winRate.toFixed(0)}% WR
+                          </div>
+                        )}
+                      </div>
+                      <div className="text-xs text-text-tertiary mt-0.5 flex items-center gap-2">
+                        <span className="bg-white/5 px-1.5 py-0.5 rounded text-[10px]">{strat.symbol}</span>
+                        <span className="bg-white/5 px-1.5 py-0.5 rounded text-[10px]">{strat.timeframe}</span>
+                        {strat.exchange && (
+                          <span className="bg-white/5 px-1.5 py-0.5 rounded text-[10px] flex items-center gap-1">
+                            {strat.exchange}
+                            {getExchange(strat.exchange).requiresKYC === false && <Activity size={8} className="text-accent-success" />}
+                          </span>
+                        )}
+                        <span>•</span>
+                        <span>{new Date(strat.updatedAt).toLocaleDateString()}</span>
+                      </div>
+                    </div>
+                    <button onClick={(e) => handleDelete(e, strat.id)} className="p-2 hover:bg-accent-danger/10 text-text-tertiary hover:text-accent-danger rounded-lg transition-colors z-10">
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+
+                  <div className="flex gap-2 mt-2">
+                    <div className="text-[10px] px-2 py-1 bg-background-elevated rounded border border-white/5 text-text-secondary flex items-center gap-1.5">
+                      <Activity size={10} /> {strat.indicators.length} Indicators
+                    </div>
+                    <div className="text-[10px] px-2 py-1 bg-background-elevated rounded border border-white/5 text-text-secondary flex items-center gap-1.5">
+                      <Zap size={10} /> {strat.entryRules.length} Entry Rules
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        </div>
+      )}
     </div>
   );
 };
-
-export default StrategyBuilder;

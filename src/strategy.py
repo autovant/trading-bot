@@ -94,6 +94,9 @@ class TradingStrategy:
         # State tracking
         self.positions: Dict[str, PositionSnapshot] = {}
         self.orders: Dict[str, OrderResponse] = {}
+        
+        # Dynamic strategy engines
+        self.dynamic_engines: Dict[str, DynamicStrategyEngine] = {}
 
         if strategy_config:
             logger.info(f"Initializing Dynamic Strategy Engine: {strategy_config.name}")
@@ -398,126 +401,126 @@ class TradingStrategy:
             logger.warning(f"Insufficient data for {symbol}")
             return
 
-            # Microstructure Analysis (Common for all strategies)
-            vwap_val: Optional[float] = None
-            ob_metrics: Dict[str, Any] = {}
+        # Microstructure Analysis (Common for all strategies)
+        vwap_val: Optional[float] = None
+        ob_metrics: Dict[str, Any] = {}
 
-            if self.config.strategy.vwap.enabled:
-                if self.config.strategy.vwap.mode == "rolling":
-                    vwap_series = self.indicators.rolling_vwap(
-                        signal_data, self.config.strategy.vwap.rolling_window
-                    )
-                else:
-                    vwap_series = self.indicators.vwap(signal_data)
-                vwap_val = vwap_series.iloc[-1]
-
-            if self.config.strategy.orderbook.enabled:
-                orderbook = await self.exchange.get_order_book(
-                    symbol, limit=self.config.strategy.orderbook.depth
+        if self.config.strategy.vwap.enabled:
+            if self.config.strategy.vwap.mode == "rolling":
+                vwap_series = self.indicators.rolling_vwap(
+                    signal_data, self.config.strategy.vwap.rolling_window
                 )
-                if orderbook:
-                    ob_metrics["imbalance"] = (
-                        OrderBookIndicators.compute_orderbook_imbalance(
-                            orderbook, self.config.strategy.orderbook.depth
-                        )
-                    )
-                    spread, mid, _ = OrderBookIndicators.compute_spread_and_mid(
-                        orderbook
-                    )
-                    ob_metrics["spread"] = spread
-                    ob_metrics["mid_price"] = mid
-                    ob_metrics["walls"] = OrderBookIndicators.detect_liquidity_walls(
-                        orderbook,
-                        self.config.strategy.orderbook.depth,
-                        self.config.strategy.orderbook.wall_multiplier,
-                    )
-
-            # Strategy Execution
-            if self.dynamic_engines:
-                # Run all dynamic strategies
-                for name, engine in self.dynamic_engines.items():
-                    # 1. Regime
-                    regime = engine.detect_regime(regime_data)
-                    # 2. Setup
-                    setup = engine.detect_setup(setup_data)
-                    # 3. Signals
-                    signals = engine.generate_signals(signal_data)
-
-                    # 4. Filter
-                    # Note: Dynamic engine generate_signals checks entry conditions.
-                    # But we might want to check regime/setup alignment.
-                    # Use common filter logic.
-                    # Actually, _filter_signals uses the `regime` and `setup` objects.
-                    # So we can use it.
-
-                    valid_signals = self.signal_generator.filter_signals(
-                        signals, regime, setup
-                    )
-
-                    # 4.5 Microstructure
-                    valid_signals = self.signal_generator.apply_microstructure_filters(
-                        valid_signals, vwap_val, ob_metrics, self.config.strategy
-                    )
-
-                    # 5. Score and Execute
-                    for signal in valid_signals:
-                        confidence = engine.calculate_confidence(regime, setup, signal)
-                        threshold = engine.config.confidence_threshold
-
-                        if confidence.total_score >= threshold:
-                            logger.info(
-                                f"Strategy {name} triggered {signal.direction} "
-                                f"signal for {symbol}"
-                            )
-                            await self._execute_signal(
-                                symbol, signal, confidence, regime, vwap_val, ob_metrics
-                            )
-
             else:
-                # Component-based Strategy
-                # 1. Regime Detection
-                regime = self.signal_generator.detect_regime(
-                    regime_data, self.config.strategy
+                vwap_series = self.indicators.vwap(signal_data)
+            vwap_val = vwap_series.iloc[-1]
+
+        if self.config.strategy.orderbook.enabled:
+            orderbook = await self.exchange.get_order_book(
+                symbol, limit=self.config.strategy.orderbook.depth
+            )
+            if orderbook:
+                ob_metrics["imbalance"] = (
+                    OrderBookIndicators.compute_orderbook_imbalance(
+                        orderbook, self.config.strategy.orderbook.depth
+                    )
+                )
+                spread, mid, _ = OrderBookIndicators.compute_spread_and_mid(
+                    orderbook
+                )
+                ob_metrics["spread"] = spread
+                ob_metrics["mid_price"] = mid
+                ob_metrics["walls"] = OrderBookIndicators.detect_liquidity_walls(
+                    orderbook,
+                    self.config.strategy.orderbook.depth,
+                    self.config.strategy.orderbook.wall_multiplier,
                 )
 
-                # 2. Setup Detection
-                setup = self.signal_generator.detect_setup(
-                    setup_data, self.config.strategy
-                )
+        # Strategy Execution
+        if self.dynamic_engines:
+            # Run all dynamic strategies
+            for name, engine in self.dynamic_engines.items():
+                # 1. Regime
+                regime = engine.detect_regime(regime_data)
+                # 2. Setup
+                setup = engine.detect_setup(setup_data)
+                # 3. Signals
+                signals = engine.generate_signals(signal_data)
 
-                # 3. Signal Generation
-                signals = self.signal_generator.generate_signals(
-                    signal_data, self.config.strategy
-                )
+                # 4. Filter
+                # Note: Dynamic engine generate_signals checks entry conditions.
+                # But we might want to check regime/setup alignment.
+                # Use common filter logic.
+                # Actually, _filter_signals uses the `regime` and `setup` objects.
+                # So we can use it.
 
-                # 4. Filter signals by regime and setup
-                # Delegated to SignalGenerator
                 valid_signals = self.signal_generator.filter_signals(
                     signals, regime, setup
                 )
 
-                # 4.5 Microstructure Analysis
-                # Delegated to SignalGenerator
+                # 4.5 Microstructure
                 valid_signals = self.signal_generator.apply_microstructure_filters(
                     valid_signals, vwap_val, ob_metrics, self.config.strategy
                 )
 
-                # 5. Score and execute valid signals
+                # 5. Score and Execute
                 for signal in valid_signals:
-                    confidence = self.position_manager.calculate_confidence(
-                        regime,
-                        setup,
-                        signal,
-                        self.config.strategy,
-                        self.market_data,
-                        symbol,
-                    )
-                    threshold = self.config.strategy.confidence.min_threshold
+                    confidence = engine.calculate_confidence(regime, setup, signal)
+                    threshold = engine.config.confidence_threshold
 
                     if confidence.total_score >= threshold:
+                        logger.info(
+                            f"Strategy {name} triggered {signal.direction} "
+                            f"signal for {symbol}"
+                        )
                         await self._execute_signal(
                             symbol, signal, confidence, regime, vwap_val, ob_metrics
                         )
+
+        else:
+            # Component-based Strategy
+            # 1. Regime Detection
+            regime = self.signal_generator.detect_regime(
+                regime_data, self.config.strategy
+            )
+
+            # 2. Setup Detection
+            setup = self.signal_generator.detect_setup(
+                setup_data, self.config.strategy
+            )
+
+            # 3. Signal Generation
+            signals = self.signal_generator.generate_signals(
+                signal_data, self.config.strategy
+            )
+
+            # 4. Filter signals by regime and setup
+            # Delegated to SignalGenerator
+            valid_signals = self.signal_generator.filter_signals(
+                signals, regime, setup
+            )
+
+            # 4.5 Microstructure Analysis
+            # Delegated to SignalGenerator
+            valid_signals = self.signal_generator.apply_microstructure_filters(
+                valid_signals, vwap_val, ob_metrics, self.config.strategy
+            )
+
+            # 5. Score and execute valid signals
+            for signal in valid_signals:
+                confidence = self.position_manager.calculate_confidence(
+                    regime,
+                    setup,
+                    signal,
+                    self.config.strategy,
+                    self.market_data,
+                    symbol,
+                )
+                threshold = self.config.strategy.confidence.min_threshold
+
+                if confidence.total_score >= threshold:
+                    await self._execute_signal(
+                        symbol, signal, confidence, regime, vwap_val, ob_metrics
+                    )
 
     async def _execute_signal(
         self,

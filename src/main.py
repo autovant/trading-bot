@@ -139,6 +139,7 @@ class TradingEngine:
             self.run_id = self.container.run_id
 
             if self.strategy:
+                logger.info("Initializing Legacy TradingStrategy (Generic/Spot)...")
                 try:
                     await self.strategy.execution_engine.reconcile_startup()
                 except Exception as e:
@@ -148,7 +149,7 @@ class TradingEngine:
                     raise
 
             if hasattr(self.config, "perps"):
-                logger.info("Initializing PerpsService...")
+                logger.info("Initializing PerpsService (Primary Futures Engine)...")
                 try:
                     perps_exchange = self.exchange
                     if self.config.app_mode != "live" and self.paper_broker:
@@ -161,6 +162,7 @@ class TradingEngine:
                         self.config.perps,
                         perps_exchange,
                         trading_config=self.config.trading,
+                        strategy_config=self.config.strategy,
                         crisis_config=self.config.risk_management.crisis_mode,
                         database=self.database,
                         mode_name=self.config.app_mode,

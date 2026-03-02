@@ -35,6 +35,31 @@ class CCXTClient:
         self.exchange_id = config.name.lower()
         self.exchange: Optional[ccxt.Exchange] = None
         self._initialized = False
+        self._time_offset_ms = 0
+        self._last_time_sync = 0.0
+
+    @property
+    def time_offset_ms(self) -> int:
+        return self._time_offset_ms
+
+    async def sync_time(self) -> int:
+        """
+        Synchronize time with the exchange and return the offset in ms.
+        Positive offset means exchange time is ahead of local time.
+        """
+        if not self.exchange:
+            return 0
+        
+        try:
+            # fetchTime returns server time in ms
+            server_time = await self.exchange.fetch_time()
+            local_time = int(datetime.now(timezone.utc).timestamp() * 1000)
+            self._time_offset_ms = server_time - local_time
+            self._last_time_sync = datetime.now(timezone.utc).timestamp()
+            return self._time_offset_ms
+        except Exception as e:
+            logger.warning(f"Failed to sync time with exchange: {e}")
+            return self._time_offset_ms
 
     async def initialize(self) -> None:
         """Initialize the CCXT exchange instance."""

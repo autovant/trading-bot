@@ -67,6 +67,10 @@ async def test_get_historical_data(mock_config):
         client = create_exchange_client(
             mock_config, app_mode="paper", paper_broker=mock_paper
         )
+        # Enable CCXT for this test
+        client._ccxt_available = True
+        await client.initialize()
+        
         df = await client.get_historical_data("BTC/USDT", "1h")
         assert df is not None
         assert not df.empty

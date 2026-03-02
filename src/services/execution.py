@@ -73,6 +73,7 @@ class ExecutionService(BaseService):
             risk_config=self.config.risk_management,
             execution_listener=self._publish_execution_report,
         )
+        await self.broker.restore_state()
 
         orders_subject = self.config.messaging.subjects["orders"]
         market_subject = self.config.messaging.subjects["market_data"]

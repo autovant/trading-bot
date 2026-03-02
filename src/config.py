@@ -139,6 +139,7 @@ class PerpsConfig(StrictModel):
     atrRiskScalingFactor: float = Field(default=0.5, ge=0, le=1)
     breakevenAfterTp1: bool = True
     earlyExitOnCross: bool = False
+    useAdvancedStrategy: bool = False
     useTestnet: bool = True
     consecutiveLossLimit: Optional[int] = Field(default=None, ge=1)
     maxMarginRatio: float = Field(default=0.8, ge=0, le=1)
@@ -151,6 +152,7 @@ class PerpsConfig(StrictModel):
     maxDataGapMultiplier: float = Field(default=2.5, ge=1.0)
     timeSyncIntervalSeconds: int = Field(default=60, ge=1)
     timeSyncMaxSkewMs: int = Field(default=1000, ge=0)
+    orderAckTimeoutSeconds: int = Field(default=30, ge=1)
 
     @model_validator(mode="after")
     def _validate_mode(self) -> "PerpsConfig":

@@ -32,6 +32,8 @@ from src.config import PerpsConfig, TradingBotConfig, get_config
 from src.database import DatabaseManager
 from src.exchanges.paper_perps import PaperPerpsExchange
 from src.exchanges.zoomex_v3 import ZoomexV3Client
+from src.exchanges.bybit_ws import BybitWebsocketClient
+from src.messaging import MessagingClient
 from src.paper_trader import PaperBroker
 from src.risk.risk_manager import RiskManager
 from src.security.mode_guard import (
@@ -312,6 +314,8 @@ class TradingBot:
         self.config: Optional[TradingBotConfig] = None
         self.session: Optional[aiohttp.ClientSession] = None
         self.perps_service: Optional[PerpsService] = None
+        self.messaging: Optional[MessagingClient] = None
+        self.bybit_ws: Optional[BybitWebsocketClient] = None
         self.risk_manager: Optional[RiskManager] = None
         self.trade_logger: Optional[TradeLogger] = None
         self.active_config_id: Optional[str] = Path(config_path).stem
@@ -356,6 +360,16 @@ class TradingBot:
         self.database = DatabaseManager(self.config.database.url)
         await self.database.initialize()
 
+        # Initialize Messaging
+        logger.info("Initializing MessagingClient...")
+        self.messaging = MessagingClient(self.config.messaging.model_dump())
+        if self.config.messaging.servers:
+            try:
+                await self.messaging.connect()
+                logger.info("Connected to NATS")
+            except Exception as e:
+                logger.warning(f"Failed to connect to NATS: {e}")
+
         if hasattr(self.config, "perps") and self.config.perps.enabled:
             if self.mode == "paper":
                 self.paper_broker = PaperBroker(
@@ -366,6 +380,7 @@ class TradingBot:
                     initial_balance=self.config.trading.initial_capital,
                     risk_config=self.config.risk_management,
                 )
+                await self.paper_broker.restore_state()
                 exchange = PaperPerpsExchange(
                     exchange_config=self.config.exchange,
                     perps_config=self.config.perps,
@@ -389,6 +404,19 @@ class TradingBot:
                     max_requests_per_second=self.config.perps.maxRequestsPerSecond,
                     max_requests_per_minute=self.config.perps.maxRequestsPerMinute,
                 )
+                
+                # Initialize WebSocket Client for Real-time Updates
+                if self.messaging:
+                    logger.info("Initializing BybitWebSocketClient...")
+                    self.bybit_ws = BybitWebsocketClient(
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        messaging=self.messaging,
+                        testnet=self.config.perps.useTestnet
+                    )
+                    # Start WS task
+                    asyncio.create_task(self.bybit_ws.start())
+
             self.perps_service = PerpsService(
                 self.config.perps,
                 exchange,
@@ -398,9 +426,10 @@ class TradingBot:
                 config_id=self.active_config_id,
                 database=self.database,
                 mode_name=self.mode,
+                messaging=self.messaging,
             )
             await self.perps_service.initialize()
-            logger.info("Perps service initialized successfully")
+            logger.info("PerpsService initialized successfully")
         else:
             raise ValueError("Perps trading is not enabled in configuration")
 

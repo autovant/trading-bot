@@ -45,7 +45,7 @@ export const ModernSelect: React.FC<ModernSelectProps> = ({
     return (
         <div className={cn("relative", className)} ref={containerRef}>
             {label && (
-                <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-bold mb-1.5 ml-1">
+                <label className="block text-[10px] uppercase tracking-wider text-text-secondary font-bold mb-1.5 ml-1">
                     {label}
                 </label>
             )}
@@ -55,26 +55,26 @@ export const ModernSelect: React.FC<ModernSelectProps> = ({
                 onClick={() => setIsOpen(!isOpen)}
                 className={cn(
                     "w-full flex items-center justify-between px-3 py-2 text-sm text-left transition-all duration-200",
-                    "bg-gray-950 border border-gray-800 rounded-lg",
-                    "hover:border-gray-700 hover:bg-gray-900",
+                    "bg-background-primary border border-white/10 rounded-lg",
+                    "hover:border-white/20 hover:bg-background-secondary",
                     "focus:outline-none focus:ring-1 focus:ring-brand-secondary/50 focus:border-brand-secondary/50",
                     isOpen && "border-brand-secondary/50 ring-1 ring-brand-secondary/50"
                 )}
             >
                 <span className={cn(
                     "font-medium truncate",
-                    !selectedOption ? "text-gray-500" : "text-gray-200"
+                    !selectedOption ? "text-text-tertiary" : "text-text-primary"
                 )}>
                     {selectedOption ? selectedOption.label : placeholder}
                 </span>
                 <ChevronDown className={cn(
-                    "w-4 h-4 text-gray-500 transition-transform duration-200",
+                    "w-4 h-4 text-text-tertiary transition-transform duration-200",
                     isOpen && "transform rotate-180 text-brand-secondary"
                 )} />
             </button>
 
             {isOpen && (
-                <div className="absolute z-50 w-full mt-1 overflow-hidden bg-gray-900 border border-gray-700 rounded-lg shadow-xl animate-in fade-in zoom-in-95 duration-100">
+                <div className="absolute z-50 w-full mt-1 overflow-hidden bg-background-elevated border border-white/10 rounded-lg shadow-xl animate-in fade-in zoom-in-95 duration-100">
                     <div className="max-h-60 overflow-auto py-1 custom-scrollbar">
                         {options.map((option) => (
                             <button
@@ -85,8 +85,8 @@ export const ModernSelect: React.FC<ModernSelectProps> = ({
                                 }}
                                 className={cn(
                                     "w-full flex items-center justify-between px-3 py-2 text-sm transition-colors",
-                                    "hover:bg-gray-800 hover:text-white",
-                                    value === option.value ? "bg-brand-secondary/10 text-brand-secondary" : "text-gray-300"
+                                    "hover:bg-white/5 hover:text-white",
+                                    value === option.value ? "bg-brand-secondary/10 text-brand-secondary" : "text-text-secondary"
                                 )}
                             >
                                 <span className="font-medium">{option.label}</span>

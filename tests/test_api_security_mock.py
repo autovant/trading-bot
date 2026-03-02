@@ -24,11 +24,10 @@ def mock_dependencies():
     # No, likely imported.
 
     with (
-        patch("src.api_server.DatabaseManager") as MockDB,
-        patch("src.api_server.MessagingClient") as MockMsg,
-        patch("src.api_server.ExchangeClient") as MockEx,
-        patch("src.api_server.PaperBroker") as MockPaper,
-        patch("src.api_server.StrategyService") as MockStrategy,
+        patch("src.api.main.DatabaseManager") as MockDB,
+        patch("src.api.main.MessagingClient") as MockMsg,
+        patch("src.api.main.ExchangeClient") as MockEx,
+        patch("src.api.main.PaperBroker") as MockPaper,
     ):
         # Setup AsyncMocks for awaitable methods
         MockDB.return_value.initialize = AsyncMock()
@@ -54,7 +53,7 @@ def test_api_security(mock_dependencies):
     # But python imports are cached.
     # Better to import at top level, but assume patches work on the class.
 
-    from src.api_server import app
+    from src.api.main import app
 
     with TestClient(app) as client:
         # 1. Unprotected Endpoint (Health/Status)

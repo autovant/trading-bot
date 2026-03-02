@@ -2,19 +2,23 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from unittest.mock import AsyncMock
 
 import pandas as pd
 import pytest
 
 from src.alerts.manager import AlertManager
-from src.config import PerpsConfig, TradingBotConfig, _assert_no_literal_secrets
-from src.database import DatabaseManager
+from src.config import PaperConfig, PerpsConfig, TradingBotConfig, _assert_no_literal_secrets
+from src.database import DatabaseManager, PnLEntry, Position
 from src.engine.execution import ExecutionEngine
 from src.engine.order_intent_ledger import OrderIntentLedger
+from src.paper_trader import PaperBroker
 from src.position_manager import PositionManager
 from src.risk.risk_manager import RiskManager
 from src.risk_manager import RiskManager as LegacyRiskManager
 from src.services.perps import PerpsService
+from src.models import MarketSnapshot
+from src.exchanges.zoomex_v3 import ZoomexV3Client
 
 
 class TimeoutExchange:
@@ -277,3 +281,100 @@ def test_secrets_in_yaml_rejected() -> None:
         _assert_no_literal_secrets(
             {"exchange": {"api_key": "plain", "secret_key": "secret"}}
         )
+
+
+def test_perps_mode_exchange_guard_rejects_mismatch() -> None:
+    config = PerpsConfig(enabled=True, symbol="BTCUSDT")
+    exchange = ZoomexV3Client(AsyncMock(), require_auth=False)
+    perps = PerpsService(config=config, exchange=exchange, mode_name="paper")
+    with pytest.raises(ValueError):
+        perps._validate_exchange_mode()
+
+
+@pytest.mark.asyncio
+async def test_paper_broker_restart_restores_state(tmp_path: Path) -> None:
+    db = DatabaseManager("sqlite:///:memory:")
+    await db.initialize()
+    try:
+        config = PaperConfig()
+        broker = PaperBroker(
+            config=config,
+            database=db,
+            mode="paper",
+            run_id="run-restore",
+            initial_balance=1000.0,
+        )
+        snapshot = MarketSnapshot(
+            symbol="BTCUSDT",
+            best_bid=99.0,
+            best_ask=101.0,
+            bid_size=1.0,
+            ask_size=1.0,
+            last_price=100.0,
+            timestamp=datetime.now(timezone.utc),
+        )
+        await broker.update_market(snapshot)
+        await broker.place_order(
+            symbol="BTCUSDT",
+            side="buy",
+            order_type="limit",
+            quantity=1.0,
+            price=98.0,
+            client_id="limit-1",
+        )
+        await broker.place_order(
+            symbol="BTCUSDT",
+            side="sell",
+            order_type="stop_market",
+            quantity=1.0,
+            stop_price=80.0,
+            client_id="stop-1",
+        )
+        await db.update_position(
+            Position(
+                symbol="BTCUSDT",
+                side="long",
+                size=1.0,
+                entry_price=100.0,
+                mark_price=100.0,
+                unrealized_pnl=0.0,
+                percentage=0.0,
+                mode="paper",
+                run_id="run-restore",
+            )
+        )
+        await db.add_pnl_entry(
+            PnLEntry(
+                symbol="BTCUSDT",
+                trade_id="pnl-1",
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                commission=0.0,
+                fees=0.0,
+                funding=0.0,
+                net_pnl=0.0,
+                balance=1234.0,
+                mode="paper",
+                run_id="run-restore",
+                timestamp=datetime.now(timezone.utc),
+            )
+        )
+
+        restored = PaperBroker(
+            config=config,
+            database=db,
+            mode="paper",
+            run_id="run-restore",
+            initial_balance=1000.0,
+        )
+        await restored.restore_state()
+
+        orders = await restored.get_open_orders()
+        assert {order.order_type for order in orders} == {"limit", "stop_market"}
+        positions = await restored.get_positions()
+        assert len(positions) == 1
+        assert positions[0].symbol == "BTCUSDT"
+        balance = await restored.get_account_balance()
+        assert balance["totalWalletBalance"] == pytest.approx(1234.0)
+    finally:
+        await db.close()

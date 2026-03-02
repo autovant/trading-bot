@@ -42,6 +42,13 @@ class _StopOrder:
 
 
 @dataclass
+class _PendingMarketOrder:
+    order: Order
+    remaining_qty: float
+    reduce_only: bool = True
+
+
+@dataclass
 class _PositionState:
     symbol: str
     size: float = 0.0  # positive = long, negative = short
@@ -88,6 +95,7 @@ class PaperBroker:
         self._positions: Dict[str, _PositionState] = {}
         self._resting_limits: Dict[str, List[_RestingOrder]] = {}
         self._stop_orders: Dict[str, _StopOrder] = {}
+        self._pending_markets: List[_PendingMarketOrder] = []
         self._latency_mu = config.latency_ms.mean
         self._latency_sigma = self._derive_latency_sigma(
             config.latency_ms.mean, config.latency_ms.p95
@@ -234,6 +242,7 @@ class PaperBroker:
 
         triggers: List[_StopOrder] = []
         fills: List[Tuple[_RestingOrder, MarketSnapshot]] = []
+        pending_markets: List[_PendingMarketOrder] = []
 
         async with self._lock:
             previous = self._market_state.get(snapshot.symbol)
@@ -278,11 +287,35 @@ class PaperBroker:
             else:
                 self._resting_limits.pop(snapshot.symbol, None)
 
+            if self._pending_markets:
+                pending_markets = list(self._pending_markets)
+                self._pending_markets.clear()
+
         for stop in triggers:
             await self._execute_stop(stop, snapshot)
 
         for rest, snap in fills:
             await self._fill_resting_limit(rest, snap)
+
+        for pending in pending_markets:
+            fills = self._simulate_order(
+                snapshot,
+                pending.order,
+                reduce_only=pending.reduce_only,
+            )
+            for delay_ms, fill_qty, fill_price, maker, slippage_bps in fills:
+                asyncio.create_task(
+                    self._finalise_fill(
+                        order=pending.order,
+                        snapshot=snapshot,
+                        fill_qty=fill_qty,
+                        fill_price=fill_price,
+                        maker=maker,
+                        slippage_bps=slippage_bps,
+                        delay_ms=delay_ms,
+                        reduce_only=pending.reduce_only,
+                    )
+                )
 
     async def cancel_all_orders(self, symbol: str) -> List[Dict[str, Any]]:
         """Cancel all open orders for a symbol."""
@@ -369,9 +402,175 @@ class PaperBroker:
         async with self._lock:
             return {"totalWalletBalance": self._balance}
 
+    async def restore_state(self) -> None:
+        logger = logging.getLogger(__name__)
+        pnl_entries = await self.database.get_pnl_history(days=3650)
+        matching_pnl = [
+            entry
+            for entry in pnl_entries
+            if entry.run_id == self.run_id and entry.mode == self.mode
+        ]
+        latest_balance = self._balance
+        if matching_pnl:
+            def _entry_ts(entry: PnLEntry) -> float:
+                if not entry.timestamp:
+                    return 0.0
+                ts = entry.timestamp
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                return ts.timestamp()
+
+            latest = max(matching_pnl, key=_entry_ts)
+            latest_balance = latest.balance
+
+        positions = await self.database.get_positions(
+            mode=self.mode, run_id=self.run_id
+        )
+        restored_positions: Dict[str, _PositionState] = {}
+        for pos in positions:
+            direction = 1 if pos.side.lower() == "long" else -1
+            restored_positions[pos.symbol] = _PositionState(
+                symbol=pos.symbol,
+                size=direction * pos.size,
+                avg_price=pos.entry_price,
+                unrealized_pnl=pos.unrealized_pnl,
+            )
+
+        open_orders: List[Order] = []
+        for status in ("open", "partially_filled"):
+            open_orders.extend(
+                await self.database.get_orders(status=status, is_shadow=False)
+            )
+            shadow_orders = await self.database.get_orders(
+                status=status, is_shadow=True
+            )
+            for order in shadow_orders:
+                order.is_shadow = True
+            open_orders.extend(shadow_orders)
+
+        open_orders = [
+            order
+            for order in open_orders
+            if order.run_id == self.run_id and order.mode == self.mode
+        ]
+
+        filled_by_order: Dict[str, float] = {}
+        for is_shadow in (False, True):
+            scoped_orders = [o for o in open_orders if o.is_shadow == is_shadow]
+            order_ids = [o.order_id or o.client_id for o in scoped_orders]
+            trades = await self.database.get_trades_by_order_ids(
+                order_ids,
+                run_id=self.run_id,
+                mode=self.mode,
+                is_shadow=is_shadow,
+            )
+            for trade in trades:
+                filled_by_order[trade.order_id] = filled_by_order.get(
+                    trade.order_id, 0.0
+                ) + trade.quantity
+
+        restored_limits: Dict[str, List[_RestingOrder]] = {}
+        restored_stops: Dict[str, _StopOrder] = {}
+        restored_pending: List[_PendingMarketOrder] = []
+        restored_progress: Dict[str, float] = {}
+
+        for order in open_orders:
+            order_id = order.order_id or order.client_id
+            filled_qty = filled_by_order.get(order_id, 0.0)
+            remaining = max(order.quantity - filled_qty, 0.0)
+            if remaining <= 0:
+                await self.database.update_order_status(
+                    order_id=order_id,
+                    status="filled",
+                    is_shadow=order.is_shadow,
+                )
+                continue
+
+            order.quantity = remaining
+            reduce_only = self._infer_reduce_only(
+                order, restored_positions.get(order.symbol)
+            )
+            restored_progress[order.client_id] = remaining
+
+            if order.order_type in ("stop", "stop_market"):
+                if order.stop_price is None:
+                    logger.warning(
+                        "Restore skipped stop order without stop_price: %s", order_id
+                    )
+                    await self.database.update_order_status(
+                        order_id=order_id,
+                        status="failed",
+                        is_shadow=order.is_shadow,
+                    )
+                    continue
+                restored_stops[order.client_id] = _StopOrder(
+                    order=order,
+                    stop_price=order.stop_price,
+                    reduce_only=reduce_only,
+                )
+            elif order.order_type == "limit":
+                if order.price is None:
+                    logger.warning(
+                        "Restore skipped limit order without price: %s", order_id
+                    )
+                    await self.database.update_order_status(
+                        order_id=order_id,
+                        status="failed",
+                        is_shadow=order.is_shadow,
+                    )
+                    continue
+                restored_limits.setdefault(order.symbol, []).append(
+                    _RestingOrder(
+                        order=order,
+                        limit_price=order.price,
+                        remaining_qty=remaining,
+                        reduce_only=reduce_only,
+                    )
+                )
+            else:
+                restored_pending.append(
+                    _PendingMarketOrder(
+                        order=order,
+                        remaining_qty=remaining,
+                        reduce_only=reduce_only,
+                    )
+                )
+
+        async with self._lock:
+            self._balance = latest_balance
+            self._positions = restored_positions
+            self._resting_limits = restored_limits
+            self._stop_orders = restored_stops
+            self._pending_markets = restored_pending
+            self._order_progress = restored_progress
+
+        logger.info(
+            "PaperBroker restored: balance=$%.2f positions=%d open_orders=%d pending_markets=%d",
+            latest_balance,
+            len(restored_positions),
+            len(restored_progress),
+            len(restored_pending),
+        )
+
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
+
+    def _infer_reduce_only(
+        self, order: Order, position_state: Optional[_PositionState]
+    ) -> bool:
+        order_type = str(order.order_type).lower()
+        if order_type in ("stop", "stop_market"):
+            return True
+        client_id = order.client_id or ""
+        if client_id.endswith("-tp") or client_id.endswith("-sl"):
+            return True
+        if position_state and position_state.size != 0:
+            if position_state.size > 0 and str(order.side).lower() == "sell":
+                return True
+            if position_state.size < 0 and str(order.side).lower() == "buy":
+                return True
+        return False
 
     def _derive_latency_sigma(self, mean: float, p95: float) -> float:
         if p95 <= mean:

@@ -14,24 +14,43 @@ logger = logging.getLogger(__name__)
 class PaperExchange(IExchange):
     """
     Paper trading exchange implementation using PaperBroker for execution
-    and CCXT for market data.
+    and optionally CCXT for market data.
     """
 
     def __init__(self, config: ExchangeConfig, paper_broker: PaperBroker):
         self.config = config
         self.paper_broker = paper_broker
-        # We still use CCXT for data fetching even in paper mode
-        self.ccxt_client = CCXTClient(config)
+        # CCXT is optional - disabled by default due to potential geo-blocking issues
+        self.ccxt_client: Optional[CCXTClient] = None
+        self._ccxt_available = False  # Disabled - CCXT causes connection issues when geo-blocked
+        
+    @property
+    def time_offset_ms(self) -> int:
+        return 0
+        
+    async def sync_time(self) -> int:
+        return 0
 
     async def initialize(self) -> None:
         """Initialize the exchange connection."""
-        # Initialize data source
-        try:
-            await self.ccxt_client.initialize()
-        except Exception as e:
-            logger.warning(f"Failed to initialize CCXT for paper data: {e}")
+        # Try to initialize CCXT for market data (optional)
+        if self._ccxt_available:
+            try:
+                self.ccxt_client = CCXTClient(self.config)
+                await self.ccxt_client.initialize()
+            except Exception as e:
+                logger.warning(f"Failed to initialize CCXT for paper data: {e}")
+                # Ensure we clean up any partially-initialized CCXT client
+                if self.ccxt_client:
+                    try:
+                        await self.ccxt_client.close()
+                    except Exception:
+                        pass
+                    self.ccxt_client = None
+                self._ccxt_available = False  # Don't retry
 
         logger.info(f"PaperExchange initialized for {self.config.name}")
+
 
     async def close(self) -> None:
         """Close the exchange connection."""

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -126,7 +126,11 @@ async def lifespan(app: FastAPI):
         app_mode=_state.config.app_mode,
         paper_broker=paper_broker,
     )
-    await _state.exchange.initialize()
+    try:
+        await _state.exchange.initialize()
+    except Exception as e:
+        logger.error(f"Failed to initialize exchange: {e}. API will have limited functionality.")
+        # Don't crash - allow server to start with limited functionality
 
     # Start background tasks
 
@@ -185,3 +189,39 @@ app.add_exception_handler(RequestValidationError, global_exception_handler)
 
 
 app.mount("/metrics", make_asgi_app())
+
+# --- WebSocket & Connection Manager ---
+from fastapi import WebSocket, WebSocketDisconnect
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except Exception:
+                pass
+
+manager = ConnectionManager()
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Just keep connection alive and echo or listen
+            data = await websocket.receive_text()
+            # Optional: handle frontend messages usually PING/PONG
+            await websocket.send_text(f"Message text was: {data}")
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+

@@ -105,7 +105,7 @@ services:
       POSTGRES_USER: tradingbot
       POSTGRES_PASSWORD: tradingbot
       POSTGRES_DB: tradingbot
-    command: [ "python3", "-m", "uvicorn", "src.api_server:app", "--host", "0.0.0.0", "--port", "8000" ]
+    command: [ "python3", "-m", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000" ]
     ports:
       - "8000:8000"
     depends_on:

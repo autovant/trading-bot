@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,7 +13,7 @@ from src.alerts.base import AlertSink
 from src.alerts.manager import AlertManager
 from src.app_logging.trade_logger import TradeLogger
 from src.config import CrisisModeConfig, PerpsConfig, TradingConfig
-from src.database import DatabaseManager, OrderIntent
+from src.database import DatabaseManager, OrderIntent, Trade
 from src.engine.order_intent_ledger import OrderIntentLedger
 from src.engine.perps_executor import (
     early_exit_reduce_only,
@@ -23,6 +24,7 @@ from src.engine.perps_executor import (
 from src.engine.pnl_tracker import PnLTracker
 from src.exchange import ExchangeClient
 from src.exchanges.zoomex_v3 import ZoomexError
+from src.messaging import MessagingClient
 from src.risk.risk_manager import RiskManager
 from src.state.perps_state_store import (
     load_perps_state,
@@ -31,6 +33,8 @@ from src.state.perps_state_store import (
 from src.state.symbol_health_store import SymbolHealthStore
 from src.strategies.perps_trend_atr_multi_tf import compute_signals_multi_tf
 from src.strategies.perps_trend_vwap import compute_signals
+from src.signal_generator import SignalGenerator
+from src.config import StrategyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +51,7 @@ class PerpsService:
         config: PerpsConfig,
         exchange: ExchangeClient,
         trading_config: Optional[TradingConfig] = None,
+        strategy_config: Optional[StrategyConfig] = None,
         crisis_config: Optional[CrisisModeConfig] = None,
         alert_sink: Optional[AlertSink] = None,
         risk_manager: Optional[RiskManager] = None,
@@ -54,11 +59,14 @@ class PerpsService:
         config_id: Optional[str] = None,
         symbol_health_store: Optional[SymbolHealthStore] = None,
         warning_size_multiplier: float = 1.0,
+
         database: Optional[DatabaseManager] = None,
         mode_name: Optional[str] = None,
+        messaging: Optional[MessagingClient] = None,
     ):
         self.config = config
         self.exchange = exchange
+        self.messaging = messaging
         self.equity_usdt = 0.0
         self.last_candle_time: Optional[datetime] = None
         self.current_position_qty = 0.0
@@ -71,7 +79,9 @@ class PerpsService:
         self.session_start_time: Optional[datetime] = None
         self.session_trades: int = 0
         self.trading_config = trading_config
+        self.strategy_config = strategy_config or StrategyConfig()
         self.crisis_config = crisis_config
+        self.signal_generator = SignalGenerator()
         self.alert_sink: AlertSink = alert_sink or AlertManager()
         self.risk_manager = risk_manager
         self.trade_logger = trade_logger
@@ -123,6 +133,36 @@ class PerpsService:
         )
         self.reconciliation_block_active = True
         return False
+
+    def _resolve_exchange_mode(self) -> Optional[str]:
+        try:
+            from src.exchanges.paper_perps import PaperPerpsExchange
+            from src.exchanges.zoomex_v3 import ZoomexV3Client
+        except Exception:
+            return None
+
+        if isinstance(self.exchange, PaperPerpsExchange):
+            return "paper"
+        if isinstance(self.exchange, ZoomexV3Client):
+            return "live"
+        return None
+
+    def _validate_exchange_mode(self) -> None:
+        expected = "paper" if self.mode_name == "paper" else "live"
+        actual = self._resolve_exchange_mode()
+        if actual is None:
+            logger.warning(
+                "SAFETY_MODE_GUARD: Exchange type %s unrecognized; "
+                "skipping strict mode check for %s",
+                type(self.exchange).__name__,
+                self.mode_name,
+            )
+            return
+        if actual != expected:
+            self.reconciliation_block_active = True
+            raise ValueError(
+                f"PerpsService mode mismatch: mode={self.mode_name} exchange={type(self.exchange).__name__}"
+            )
 
     def _intent_client_id(self, idempotency_key: str) -> str:
         run_id = self.intent_ledger.run_id if self.intent_ledger else (self.config_id or "perps")
@@ -192,6 +232,8 @@ class PerpsService:
             logger.info("Perps trading disabled")
             return
 
+        self._validate_exchange_mode()
+
         if self.mode_name == "live" and not self.database:
             raise ValueError("PerpsService requires a database for live trading.")
 
@@ -218,6 +260,96 @@ class PerpsService:
             self.config.useTestnet,
             self.equity_usdt,
         )
+        
+        await self._subscribe_to_execution_reports()
+
+    async def _subscribe_to_execution_reports(self):
+        if not self.messaging:
+            return
+
+        # Subscribe to order updates (status changes)
+        await self.messaging.subscribe("trading.orders.update", self._handle_execution_report)
+        # Subscribe to execution updates (fills)
+        await self.messaging.subscribe("trading.executions.update", self._handle_execution_report)
+        logger.info("Subscribed to real-time execution reports")
+
+    async def _handle_execution_report(self, msg: Any) -> None:
+        try:
+            # Decode NATS message
+            if hasattr(msg, "data"):
+                payload = json.loads(msg.data.decode())
+            else:
+                payload = msg  # Direct dict if memory mode or test
+
+            # Check for client_order_id (orderLinkId)
+            client_oid = payload.get("orderLinkId") or payload.get("clOrdID")
+            order_id = payload.get("orderId") or payload.get("execId")
+            status = payload.get("orderStatus")
+
+            if not client_oid and not order_id:
+                return
+
+            if not self.intent_ledger:
+                return
+
+            # Scan open intents to find match
+            # finding by client_id is most reliable for us
+            open_intents = await self.intent_ledger.list_open_order_intents(
+                mode="paper" if self.mode_name == "paper" else "live",
+                run_id=self.config_id or "perps"
+            )
+
+            target_intent = None
+            for intent in open_intents:
+                if client_oid and intent.client_id == client_oid:
+                    target_intent = intent
+                    break
+                if order_id and intent.order_id == order_id:
+                    target_intent = intent
+                    break
+            
+            if not target_intent:
+                return
+
+            # Update Intent Status
+            new_status = None
+            if status == "New":
+                new_status = "acked"
+            elif status == "PartiallyFilled":
+                new_status = "partially_filled"
+            elif status == "Filled":
+                new_status = "filled"
+            elif status == "Cancelled":
+                new_status = "canceled"
+            elif status == "Rejected":
+                new_status = "failed"
+            
+            if new_status:
+                await self.intent_ledger.update_intent_status(
+                    target_intent,
+                    status=new_status,
+                    order_id=payload.get("orderId"),
+                    filled_qty=float(payload.get("cumExecQty", 0.0)) if "cumExecQty" in payload else None,
+                    avg_fill_price=float(payload.get("avgPrice", 0.0)) if "avgPrice" in payload else None
+                )
+                logger.info("Real-time update: %s -> %s", target_intent.idempotency_key, new_status)
+            
+            # Record individual fills if this is an execution report
+            if "execId" in payload:
+                await self.intent_ledger.record_fill(
+                        intent=target_intent,
+                        trade_id=payload["execId"],
+                        order_id=payload.get("orderId"),
+                        symbol=payload.get("symbol", self.config.symbol),
+                        side=payload.get("side", "").lower(),
+                        quantity=float(payload.get("execQty", 0.0)),
+                        price=float(payload.get("execPrice", 0.0)),
+                        fee=float(payload.get("execFee", 0.0)),
+                        timestamp=datetime.now(timezone.utc)
+                )
+
+        except Exception as e:
+            logger.error("Error processing real-time execution report: %s", e)
 
     async def run_cycle(self):
         if not self.config.enabled or not self.exchange:
@@ -236,7 +368,7 @@ class PerpsService:
                 return
 
             ltf_limit = 100
-            if self.config.useMultiTfAtrStrategy:
+            if self.config.useMultiTfAtrStrategy or self.config.useAdvancedStrategy:
                 ltf_limit = max(
                     200, self.config.maxBarsInTrade + self.config.atrPeriod * 4
                 )
@@ -293,7 +425,57 @@ class PerpsService:
             if self.last_candle_time == last_closed_time:
                 return
 
-            if self.config.useMultiTfAtrStrategy:
+            if self.config.useAdvancedStrategy:
+                # Advanced Strategy Logic
+                logger.debug("Running Advanced Strategy cycle")
+                
+                # Fetch 1D Regime Data
+                regime_data = await self.exchange.get_historical_data(self.config.symbol, "1d", limit=200)
+                regime = self.signal_generator.detect_regime(regime_data, self.strategy_config)
+                
+                # Fetch 4H Setup Data
+                setup_data = await self.exchange.get_historical_data(self.config.symbol, "4h", limit=100)
+                setup = self.signal_generator.detect_setup(setup_data, self.strategy_config)
+                
+                # Use LTF (closed_df) for Signals if specific interval, or fetch 1H?
+                # SignalGenerator likely expects 1H for standard signals.
+                # But here we are iterating on `config.interval` (e.g. 5m).
+                # We should probably use the data we have if it matches, or fetch specific signal data.
+                # For efficiency, we reuse closed_df if it's 1h, otherwise fetch.
+                # Given structure, let's fetch what SignalGenerator expects.
+                signal_data = await self.exchange.get_historical_data(self.config.symbol, "1h", limit=100)
+                raw_signals = self.signal_generator.generate_signals(signal_data, self.strategy_config)
+                
+                valid_signals = self.signal_generator.filter_signals(raw_signals, regime, setup)
+                
+                # Adapt for downstream
+                signals = {
+                    "long_signal": False,
+                    "price": float(closed_df.iloc[-1]["close"]),
+                    "stop_price": float("nan"),
+                    "tp2_price": float("nan"),
+                    "atr_pct": 0.0,
+                    "htf_trend_up": regime.regime == "bullish" 
+                }
+                
+                if valid_signals:
+                     # Prioritize signals - for now pick best Long
+                    best = max(valid_signals, key=lambda s: s.confidence)
+                    if best.direction == "long":
+                        start_equity = self.config.trading.initial_capital # approximation
+                        # Calculate risk-based position size?
+                        # PerpsService logic uses _enter_long which does sizing.
+                        # We just need to signal 'long_signal'=True and price params.
+                        
+                        signals.update({
+                            "long_signal": True,
+                            "entry_price": best.entry_price,
+                            "stop_price": best.stop_loss,
+                            "tp2_price": best.take_profit,
+                            "atr_pct": 0.0 # Not used if we pass explicit stop/tp
+                        })
+
+            elif self.config.useMultiTfAtrStrategy:
                 signals = compute_signals_multi_tf(
                     closed_df,
                     closed_htf,

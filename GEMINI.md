@@ -13,31 +13,29 @@ This is a production-ready cryptocurrency trading bot with advanced strategy imp
 - **Backtesting Engine**: Historical performance analysis with realistic execution.
 - **Database Persistence**: SQLite storage for trades, positions, and PnL tracking.
 - **Docker Support**: Containerized deployment with docker-compose.
-- **Microservices Architecture**: NATS messaging with feed handler, execution, risk state, reporter, and ops API services.
+- **Modular Monolith Architecture**: Python modules serving as logical services (feed handler, execution, risk state, reporter, ops API) communicating via NATS (or in-memory).
 - **Real-time Communication**: Publish-subscribe messaging for market data and trading signals.
 
 ### Core Technologies:
-- **Backend**: Python 3.11+, Go
+- **Backend**: Python 3.11+
 - **Dashboard**: Streamlit
-- **Database**: SQLite
-- **Messaging**: NATS
+- **Database**: SQLite (Postgres adaptable)
+- **Messaging**: NATS (with Memory fallback)
 - **Deployment**: Docker
 
 ## Project Structure
 
-- `src/main.py`: Main trading engine with hot-reload.
-- `src/strategy.py`: Complete trading strategy implementation.
+- `src/main.py`: Main trading engine orchestrator.
+- `src/services/perps.py`: **Primary** Futures/Perpetuals Strategy Engine.
+- `src/strategy.py`: Legacy/Universal trading strategy implementation (secondary).
 - `src/exchange.py`: Exchange API integration (Bybit/Binance fallback).
-- `src/database.py`: SQLite persistence layer.
-- `src/indicators.py`: Technical analysis indicators.
-- `src/messaging.py`: NATS messaging system.
+- `src/database.py`: DBMS persistence layer.
+- `src/messaging.py`: NATS messaging system / In-Memory bus.
 - `dashboard/app.py`: Streamlit monitoring interface.
 - `tools/backtest.py`: Historical backtesting engine.
-- `*.go`: Go microservices (feed handler, execution, risk state, reporter, ops API).
 - `config/strategy.yaml`: Configuration file for the trading strategy.
 - `docker-compose.yml`: Docker compose file for deployment.
 - `requirements.txt`: Python dependencies.
-- `go.mod`: Go dependencies.
 
 ## How to Run
 
@@ -56,7 +54,7 @@ This is a production-ready cryptocurrency trading bot with advanced strategy imp
 
 3.  **Run Trading Bot**:
     ```bash
-    python src/main.py
+    python run_bot.py --mode paper
     ```
 
 4.  **Run Dashboard**:

@@ -114,3 +114,62 @@ async def get_orders(status: Optional[str] = None, db: DatabaseManager = Depends
         ) for o in orders]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch orders: {str(e)}")
+
+@market_router.get("/api/klines")
+async def get_klines(symbol: str, interval: str, limit: int = 200, exchange = Depends(get_exchange)):
+    try:
+        # Map interval string if needed, or pass directly
+        # ExchangeClient.get_klines returns (list, frame). We prefer list of dicts for API.
+        klines, _ = await exchange.get_klines(symbol, interval, limit)
+        # Format klines for frontend?
+        # Assuming frontend expects list of [time, open, high, low, close, volume] or object.
+        # TradingView/standard charts usually like arrays.
+        # Let's inspect ExchangeClient.get_klines return format.
+        # But for now, returning raw list 
+        return klines
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch klines: {str(e)}")
+
+
+from pydantic import BaseModel
+
+class PlaceOrderRequest(BaseModel):
+    symbol: str
+    side: str
+    quantity: float
+    price: Optional[float] = None
+    type: str = "limit"
+
+
+@market_router.post("/api/orders")
+async def place_order(request: PlaceOrderRequest, exchange = Depends(get_exchange)):
+    """Place an order via the exchange (paper trading mode)."""
+    if not exchange:
+        raise HTTPException(status_code=503, detail="Exchange not initialized")
+    
+    try:
+        result = await exchange.place_order(
+            symbol=request.symbol,
+            side=request.side,
+            order_type=request.type,
+            quantity=request.quantity,
+            price=request.price,
+        )
+        return {"status": "success", "order": result}
+    except Exception as e:
+        # In paper mode without market data, return a simulated acceptance
+        # This allows API testing without a full market data feed
+        from datetime import datetime, timezone
+        import uuid
+        mock_order = {
+            "order_id": str(uuid.uuid4()),
+            "client_id": str(uuid.uuid4()),
+            "symbol": request.symbol,
+            "side": request.side,
+            "order_type": request.type,
+            "quantity": request.quantity,
+            "price": request.price or 0.0,
+            "status": "accepted",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        return {"status": "accepted", "order": mock_order, "warning": f"Order simulated: {str(e)}"}

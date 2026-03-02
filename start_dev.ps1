@@ -47,7 +47,7 @@ if (Test-Path $lockFile) {
 
 # 3. Start Backend (API)
 Write-Host "`n3️⃣  Starting Backend API (Port 8000)..." -ForegroundColor White
-$backendProcess = Start-Process -FilePath "python" -ArgumentList "-m uvicorn src.api_server:app --reload --port 8000" -PassThru -NoNewWindow
+$backendProcess = Start-Process -FilePath "python" -ArgumentList "-m uvicorn src.api.main:app --reload --port 8000" -PassThru -NoNewWindow
 Write-Host "   ✅ Backend started (PID: $($backendProcess.Id))." -ForegroundColor Green
 
 # 4. Start Frontend

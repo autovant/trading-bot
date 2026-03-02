@@ -18,6 +18,13 @@ class LiveExchange(IExchange):
     def __init__(self, config: ExchangeConfig):
         self.config = config
         self.ccxt_client = CCXTClient(config)
+    
+    @property
+    def time_offset_ms(self) -> int:
+        return self.ccxt_client.time_offset_ms
+        
+    async def sync_time(self) -> int:
+        return await self.ccxt_client.sync_time()
 
     async def initialize(self) -> None:
         """Initialize the exchange connection."""

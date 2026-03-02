@@ -53,6 +53,8 @@ async def test_paper_exchange_initialization(exchange_config, paper_broker):
         mock_ccxt_cls.return_value = mock_ccxt
 
         exchange = PaperExchange(exchange_config, paper_broker)
+        # Enable CCXT for this test (disabled by default)
+        exchange._ccxt_available = True
         await exchange.initialize()
 
         # Should init CCXT for data

@@ -63,6 +63,7 @@ class Container:
                 initial_balance=self.config.backtesting.initial_balance,
                 risk_config=self.config.risk_management,
             )
+            await self.paper_broker.restore_state()
 
         # Exchange
         self.exchange = create_exchange_client(

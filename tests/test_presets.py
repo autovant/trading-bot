@@ -21,8 +21,8 @@ class TestPresets(unittest.TestCase):
             self.assertTrue(preset.description)
 
     def test_presets_endpoint(self):
-        """Test the /presets API endpoint."""
-        response = self.client.get("/presets")
+        """Test the /api/presets API endpoint."""
+        response = self.client.get("/api/presets")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(isinstance(data, list))

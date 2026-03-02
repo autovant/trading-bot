@@ -8,7 +8,7 @@ from src.database import DatabaseManager, PnLEntry
 @pytest.mark.asyncio
 async def test_aggregate_daily_pnl_rollup(tmp_path):
     db_path = tmp_path / "rollup.db"
-    database = DatabaseManager(db_path)
+    database = DatabaseManager(f"sqlite:///{db_path}")
     await database.initialize()
 
     base_timestamp = datetime.now(timezone.utc).replace(

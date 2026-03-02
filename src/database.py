@@ -7,7 +7,7 @@ and ``run_id`` for full auditability.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional, Union
 
 import aiosqlite
@@ -249,6 +249,22 @@ class DatabaseBackend:
     ) -> List[Order]:
         raise NotImplementedError
 
+    async def create_strategy(self, strategy: Strategy) -> Optional[int]:
+        raise NotImplementedError
+
+    async def get_strategies(self) -> List[Strategy]:
+        raise NotImplementedError
+
+    async def get_strategy(self, strategy_id: int) -> Optional[Strategy]:
+        raise NotImplementedError
+
+    async def update_strategy(self, strategy: Strategy) -> bool:
+        raise NotImplementedError
+    
+    async def toggle_strategy_active(self, strategy_id: int, is_active: bool) -> bool:
+        raise NotImplementedError
+
+
     async def create_trade(self, trade: Trade) -> Optional[int]:
         raise NotImplementedError
 
@@ -280,6 +296,16 @@ class DatabaseBackend:
     ) -> List[Trade]:
         raise NotImplementedError
 
+    async def get_trades_by_order_ids(
+        self,
+        order_ids: List[str],
+        *,
+        run_id: Optional[str] = None,
+        mode: Optional[Mode] = None,
+        is_shadow: bool = False,
+    ) -> List[Trade]:
+        raise NotImplementedError
+
     async def update_position(self, position: Position) -> bool:
         raise NotImplementedError
 
@@ -293,6 +319,9 @@ class DatabaseBackend:
 
     async def add_pnl_entry(self, entry: PnLEntry) -> bool:
         return True
+
+    async def get_pnl_history(self, days: int = 60) -> List[PnLEntry]:
+        return []
 
 
 
@@ -401,7 +430,31 @@ class PostgresBackend(DatabaseBackend):
                     fee DOUBLE PRECISION NOT NULL DEFAULT 0,
                     timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
-                CREATE INDEX IF NOT EXISTS idx_order_fills_key ON order_fills(idempotency_key);
+                CREATE TABLE IF NOT EXISTS strategies (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    config JSONB NOT NULL,
+                    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS pnl_entries (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    trade_id TEXT UNIQUE NOT NULL,
+                    realized_pnl DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    unrealized_pnl DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    commission DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    fees DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    funding DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    net_pnl DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    balance DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    mode TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_pnl_entries_timestamp ON pnl_entries(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_pnl_entries_mode_run ON pnl_entries(mode, run_id);
             """)
 
     async def close(self) -> None:
@@ -664,6 +717,31 @@ class PostgresBackend(DatabaseBackend):
             rows = await conn.fetch(query, *args)
             return [Trade(**row) for row in rows]
 
+    async def get_trades_by_order_ids(
+        self,
+        order_ids: List[str],
+        *,
+        run_id: Optional[str] = None,
+        mode: Optional[Mode] = None,
+        is_shadow: bool = False,
+    ) -> List[Trade]:
+        if not self.pool or not order_ids:
+            return []
+        table = "trades_shadow" if is_shadow else "trades"
+        query = f"SELECT * FROM {table} WHERE order_id = ANY($1)"
+        args: List[Any] = [order_ids]
+        if run_id:
+            args.append(run_id)
+            query += f" AND run_id = ${len(args)}"
+        if mode:
+            args.append(mode)
+            query += f" AND mode = ${len(args)}"
+        query += " ORDER BY timestamp DESC"
+        _log_query(query, args)
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *args)
+            return [Trade(**row) for row in rows]
+
     async def update_position(self, position: Position) -> bool:
         if not self.pool:
             return False
@@ -704,6 +782,179 @@ class PostgresBackend(DatabaseBackend):
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, *args)
             return [Position(**row) for row in rows]
+
+    async def create_strategy(self, strategy: Strategy) -> Optional[int]:
+        if not self.pool:
+            return None
+        import json
+        query = """
+            INSERT INTO strategies (name, config, is_active)
+            VALUES ($1, $2, $3)
+            RETURNING id
+        """
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                query,
+                strategy.name,
+                json.dumps(strategy.config), # Convert dict to JSON string for Postgres JSONB? Actually asyncpg handles dict to jsonb automatically if type is jsonb
+                strategy.is_active
+            )
+
+    async def get_strategies(self) -> List[Strategy]:
+        if not self.pool:
+            return []
+        import json
+        query = "SELECT * FROM strategies ORDER BY created_at DESC"
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query)
+            # Asyncpg returns JSONB as string or dict depending on codec. Usually we need to parse if it comes back as string.
+            # But asyncpg usually decodes JSON automatically. Let's assume it returns dict.
+            # However Pydantic needs matched types.
+            results = []
+            for row in rows:
+                r = dict(row)
+                if isinstance(r['config'], str):
+                     r['config'] = json.loads(r['config'])
+                results.append(Strategy(**r))
+            return results
+
+    async def get_strategy(self, strategy_id: int) -> Optional[Strategy]:
+        if not self.pool:
+            return None
+        import json
+        query = "SELECT * FROM strategies WHERE id = $1"
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, strategy_id)
+            if not row:
+                return None
+            r = dict(row)
+            if isinstance(r['config'], str):
+                r['config'] = json.loads(r['config'])
+            return Strategy(**r)
+
+    async def update_strategy(self, strategy: Strategy) -> bool:
+        if not self.pool:
+            return False
+        import json
+        query = """
+            UPDATE strategies 
+            SET name = $1, config = $2, is_active = $3, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $4
+        """
+        async with self.pool.acquire() as conn:
+            res = await conn.execute(
+                query,
+                strategy.name,
+                json.dumps(strategy.config),
+                strategy.is_active,
+                strategy.id
+            )
+            return int(res.split(" ")[-1]) > 0
+            
+    async def toggle_strategy_active(self, strategy_id: int, is_active: bool) -> bool:
+        if not self.pool:
+            return False
+        query = "UPDATE strategies SET is_active = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2"
+        async with self.pool.acquire() as conn:
+            res = await conn.execute(query, is_active, strategy_id)
+            return int(res.split(" ")[-1]) > 0
+
+    async def add_pnl_entry(self, entry: PnLEntry) -> bool:
+        if not self.pool:
+            return False
+        query = """
+            INSERT INTO pnl_entries (symbol, trade_id, realized_pnl, unrealized_pnl,
+                commission, fees, funding, net_pnl, balance, mode, run_id, timestamp)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT(trade_id) DO UPDATE SET
+                realized_pnl=excluded.realized_pnl,
+                unrealized_pnl=excluded.unrealized_pnl,
+                commission=excluded.commission,
+                fees=excluded.fees,
+                funding=excluded.funding,
+                net_pnl=excluded.net_pnl,
+                balance=excluded.balance
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                query,
+                entry.symbol,
+                entry.trade_id,
+                entry.realized_pnl,
+                entry.unrealized_pnl,
+                entry.commission,
+                entry.fees,
+                entry.funding,
+                entry.net_pnl,
+                entry.balance,
+                entry.mode,
+                entry.run_id,
+                entry.timestamp or datetime.now(timezone.utc),
+            )
+            return True
+
+    async def get_pnl_history(self, days: int = 60) -> List[PnLEntry]:
+        if not self.pool:
+            return []
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        query = """
+            SELECT * FROM pnl_entries
+            WHERE timestamp >= $1
+            ORDER BY timestamp DESC
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, cutoff)
+            return [PnLEntry(**dict(row)) for row in rows]
+
+    async def aggregate_daily_pnl(self, days: int = 60) -> List[PnLEntry]:
+        if not self.pool:
+            return []
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        query = """
+            SELECT 
+                DATE(timestamp) as day,
+                mode,
+                run_id,
+                SUM(realized_pnl) as realized_pnl,
+                SUM(unrealized_pnl) as unrealized_pnl,
+                SUM(commission) as commission,
+                SUM(fees) as fees,
+                SUM(funding) as funding,
+                SUM(net_pnl) as net_pnl,
+                (SELECT balance FROM pnl_entries p2 
+                 WHERE DATE(p2.timestamp) = DATE(pnl_entries.timestamp)
+                 AND p2.mode = pnl_entries.mode 
+                 AND p2.run_id = pnl_entries.run_id
+                 ORDER BY p2.timestamp DESC LIMIT 1) as balance,
+                MAX(timestamp) as timestamp
+            FROM pnl_entries
+            WHERE timestamp >= $1
+            GROUP BY DATE(timestamp), mode, run_id
+            ORDER BY day DESC
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, cutoff)
+            results = []
+            for row in rows:
+                d = dict(row)
+                day_str = str(d.pop('day'))
+                rollup_id = f"rollup-{d['mode']}-{d['run_id']}-{day_str}"
+                results.append(PnLEntry(
+                    symbol="ROLLUP",
+                    trade_id=rollup_id,
+                    realized_pnl=d['realized_pnl'] or 0.0,
+                    unrealized_pnl=d['unrealized_pnl'] or 0.0,
+                    commission=d['commission'] or 0.0,
+                    fees=d['fees'] or 0.0,
+                    funding=d['funding'] or 0.0,
+                    net_pnl=d['net_pnl'] or 0.0,
+                    balance=d['balance'] or 0.0,
+                    mode=d['mode'],
+                    run_id=d['run_id'],
+                    timestamp=d['timestamp'],
+                ))
+            return results
+
 
 
 class SQLiteBackend(DatabaseBackend):
@@ -811,7 +1062,31 @@ class SQLiteBackend(DatabaseBackend):
                 fee REAL NOT NULL DEFAULT 0,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
-            CREATE INDEX IF NOT EXISTS idx_order_fills_key ON order_fills(idempotency_key);
+            CREATE TABLE IF NOT EXISTS strategies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                config TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS pnl_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                trade_id TEXT UNIQUE NOT NULL,
+                realized_pnl REAL NOT NULL DEFAULT 0,
+                unrealized_pnl REAL NOT NULL DEFAULT 0,
+                commission REAL NOT NULL DEFAULT 0,
+                fees REAL NOT NULL DEFAULT 0,
+                funding REAL NOT NULL DEFAULT 0,
+                net_pnl REAL NOT NULL DEFAULT 0,
+                balance REAL NOT NULL DEFAULT 0,
+                mode TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_pnl_entries_timestamp ON pnl_entries(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_pnl_entries_mode_run ON pnl_entries(mode, run_id);
         """)
 
     async def close(self) -> None:
@@ -955,6 +1230,32 @@ class SQLiteBackend(DatabaseBackend):
         args.append(limit)
         query += " ORDER BY timestamp DESC LIMIT ?"
         
+        _log_query(query, args)
+        async with self.conn.execute(query, tuple(args)) as cursor:
+            rows = await cursor.fetchall()
+            return [Trade(**dict(row)) for row in rows]
+
+    async def get_trades_by_order_ids(
+        self,
+        order_ids: List[str],
+        *,
+        run_id: Optional[str] = None,
+        mode: Optional[Mode] = None,
+        is_shadow: bool = False,
+    ) -> List[Trade]:
+        if not self.conn or not order_ids:
+            return []
+        table = "trades_shadow" if is_shadow else "trades"
+        placeholders = ", ".join(["?"] * len(order_ids))
+        query = f"SELECT * FROM {table} WHERE order_id IN ({placeholders})"
+        args: List[Any] = list(order_ids)
+        if run_id:
+            query += " AND run_id = ?"
+            args.append(run_id)
+        if mode:
+            query += " AND mode = ?"
+            args.append(mode)
+        query += " ORDER BY timestamp DESC"
         _log_query(query, args)
         async with self.conn.execute(query, tuple(args)) as cursor:
             rows = await cursor.fetchall()
@@ -1151,6 +1452,217 @@ class SQLiteBackend(DatabaseBackend):
             rows = await cursor.fetchall()
             return [Position(**dict(row)) for row in rows]
 
+    async def create_strategy(self, strategy: Strategy) -> Optional[int]:
+        if not self.conn:
+            return None
+        import json
+        query = """
+            INSERT INTO strategies (name, config, is_active)
+            VALUES (?, ?, ?)
+        """
+        try:
+            cursor = await self.conn.execute(
+                query, (strategy.name, json.dumps(strategy.config), 1 if strategy.is_active else 0)
+            )
+            await self.conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            logger.error("SQLite create_strategy failed: %s", e)
+            return None
+
+    async def get_strategies(self) -> List[Strategy]:
+        if not self.conn:
+            return []
+        import json
+        query = "SELECT * FROM strategies ORDER BY created_at DESC"
+        async with self.conn.execute(query) as cursor:
+            rows = await cursor.fetchall()
+            results = []
+            for row in rows:
+                d = dict(row)
+                d['config'] = json.loads(d['config'])
+                d['is_active'] = bool(d['is_active'])
+                results.append(Strategy(**d))
+            return results
+
+    async def get_strategy(self, strategy_id: int) -> Optional[Strategy]:
+        if not self.conn:
+            return None
+        import json
+        query = "SELECT * FROM strategies WHERE id = ?"
+        async with self.conn.execute(query, (strategy_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            d['config'] = json.loads(d['config'])
+            d['is_active'] = bool(d['is_active'])
+            return Strategy(**d)
+
+    async def get_strategy_by_name(self, name: str) -> Optional[Strategy]:
+        if not self.conn:
+            return None
+        import json
+        query = "SELECT * FROM strategies WHERE name = ?"
+        async with self.conn.execute(query, (name,)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            d['config'] = json.loads(d['config'])
+            d['is_active'] = bool(d['is_active'])
+            return Strategy(**d)
+
+    async def update_strategy(self, strategy: Strategy) -> bool:
+        if not self.conn:
+            return False
+        import json
+        query = """
+            UPDATE strategies 
+            SET name = ?, config = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """
+        try:
+            cursor = await self.conn.execute(
+                query,
+                (
+                    strategy.name,
+                    json.dumps(strategy.config),
+                    1 if strategy.is_active else 0,
+                    strategy.id
+                )
+            )
+            await self.conn.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            logger.error("SQLite update_strategy failed: %s", e)
+            return False
+
+    async def toggle_strategy_active(self, strategy_id: int, is_active: bool) -> bool:
+        if not self.conn:
+            return False
+        query = "UPDATE strategies SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+        try:
+            cursor = await self.conn.execute(query, (1 if is_active else 0, strategy_id))
+            await self.conn.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            logger.error("SQLite toggle_strategy_active failed: %s", e)
+            return False
+
+    async def add_pnl_entry(self, entry: PnLEntry) -> bool:
+        if not self.conn:
+            return False
+        query = """
+            INSERT INTO pnl_entries (symbol, trade_id, realized_pnl, unrealized_pnl,
+                commission, fees, funding, net_pnl, balance, mode, run_id, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(trade_id) DO UPDATE SET
+                realized_pnl=excluded.realized_pnl,
+                unrealized_pnl=excluded.unrealized_pnl,
+                commission=excluded.commission,
+                fees=excluded.fees,
+                funding=excluded.funding,
+                net_pnl=excluded.net_pnl,
+                balance=excluded.balance
+        """
+        try:
+            await self.conn.execute(
+                query,
+                (
+                    entry.symbol,
+                    entry.trade_id,
+                    entry.realized_pnl,
+                    entry.unrealized_pnl,
+                    entry.commission,
+                    entry.fees,
+                    entry.funding,
+                    entry.net_pnl,
+                    entry.balance,
+                    entry.mode,
+                    entry.run_id,
+                    entry.timestamp or datetime.now(timezone.utc),
+                ),
+            )
+            await self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error("SQLite add_pnl_entry failed: %s", e)
+            return False
+
+    async def get_pnl_history(self, days: int = 60) -> List[PnLEntry]:
+        if not self.conn:
+            return []
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        query = """
+            SELECT * FROM pnl_entries
+            WHERE timestamp >= ?
+            ORDER BY timestamp DESC
+        """
+        try:
+            async with self.conn.execute(query, (cutoff.isoformat(),)) as cursor:
+                rows = await cursor.fetchall()
+                return [PnLEntry(**dict(row)) for row in rows]
+        except Exception as e:
+            logger.error("SQLite get_pnl_history failed: %s", e)
+            return []
+
+    async def aggregate_daily_pnl(self, days: int = 60) -> List[PnLEntry]:
+        if not self.conn:
+            return []
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        # Group by date, mode, run_id and aggregate
+        query = """
+            SELECT 
+                DATE(timestamp) as day,
+                mode,
+                run_id,
+                SUM(realized_pnl) as realized_pnl,
+                SUM(unrealized_pnl) as unrealized_pnl,
+                SUM(commission) as commission,
+                SUM(fees) as fees,
+                SUM(funding) as funding,
+                SUM(net_pnl) as net_pnl,
+                (SELECT balance FROM pnl_entries p2 
+                 WHERE DATE(p2.timestamp) = DATE(pnl_entries.timestamp)
+                 AND p2.mode = pnl_entries.mode 
+                 AND p2.run_id = pnl_entries.run_id
+                 ORDER BY p2.timestamp DESC LIMIT 1) as balance,
+                MAX(timestamp) as timestamp
+            FROM pnl_entries
+            WHERE timestamp >= ?
+            GROUP BY DATE(timestamp), mode, run_id
+            ORDER BY day DESC
+        """
+        try:
+            async with self.conn.execute(query, (cutoff.isoformat(),)) as cursor:
+                rows = await cursor.fetchall()
+                results = []
+                for row in rows:
+                    d = dict(row)
+                    day_str = d.pop('day')
+                    # Create rollup trade_id
+                    rollup_id = f"rollup-{d['mode']}-{d['run_id']}-{day_str}"
+                    results.append(PnLEntry(
+                        symbol="ROLLUP",
+                        trade_id=rollup_id,
+                        realized_pnl=d['realized_pnl'] or 0.0,
+                        unrealized_pnl=d['unrealized_pnl'] or 0.0,
+                        commission=d['commission'] or 0.0,
+                        fees=d['fees'] or 0.0,
+                        funding=d['funding'] or 0.0,
+                        net_pnl=d['net_pnl'] or 0.0,
+                        balance=d['balance'] or 0.0,
+                        mode=d['mode'],
+                        run_id=d['run_id'],
+                        timestamp=d['timestamp'],
+                    ))
+                return results
+        except Exception as e:
+            logger.error("SQLite aggregate_daily_pnl failed: %s", e)
+            return []
+
+
 
 class DatabaseManager:
     """Facade for database backends."""
@@ -1217,6 +1729,20 @@ class DatabaseManager:
             )
         return []
 
+    async def get_trades_by_order_ids(
+        self,
+        order_ids: List[str],
+        *,
+        run_id: Optional[str] = None,
+        mode: Optional[Mode] = None,
+        is_shadow: bool = False,
+    ) -> List[Trade]:
+        if self.backend:
+            return await self.backend.get_trades_by_order_ids(
+                order_ids, run_id=run_id, mode=mode, is_shadow=is_shadow
+            )
+        return []
+
     async def update_position(self, position: Position) -> bool:
         if self.backend:
             return await self.backend.update_position(position)
@@ -1229,6 +1755,36 @@ class DatabaseManager:
             return await self.backend.get_positions(mode, run_id)
         return []
 
+    async def create_strategy(self, strategy: Strategy) -> Optional[int]:
+        if self.backend:
+            return await self.backend.create_strategy(strategy)
+        return None
+
+    async def get_strategies(self) -> List[Strategy]:
+        if self.backend:
+            return await self.backend.get_strategies()
+        return []
+
+    async def get_strategy(self, strategy_id: int) -> Optional[Strategy]:
+        if self.backend:
+            return await self.backend.get_strategy(strategy_id)
+        return None
+
+    async def get_strategy_by_name(self, name: str) -> Optional[Strategy]:
+        if self.backend:
+            return await self.backend.get_strategy_by_name(name)
+        return None
+
+    async def update_strategy(self, strategy: Strategy) -> bool:
+        if self.backend:
+            return await self.backend.update_strategy(strategy)
+        return False
+        
+    async def toggle_strategy_active(self, strategy_id: int, is_active: bool) -> bool:
+        if self.backend:
+            return await self.backend.toggle_strategy_active(strategy_id, is_active)
+        return False
+
     async def aggregate_daily_pnl(self, days: int = 60) -> List[PnLEntry]:
         if self.backend:
             return await self.backend.aggregate_daily_pnl(days)
@@ -1238,6 +1794,11 @@ class DatabaseManager:
         if self.backend:
             return await self.backend.add_pnl_entry(entry)
         return True
+
+    async def get_pnl_history(self, days: int = 60) -> List[PnLEntry]:
+        if self.backend:
+            return await self.backend.get_pnl_history(days)
+        return []
 
     async def create_order_intent(self, intent: OrderIntent) -> Optional[int]:
         if self.backend:
