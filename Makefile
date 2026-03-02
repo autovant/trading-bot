@@ -36,8 +36,8 @@ readiness-report: ## Generate production readiness report
 
 .PHONY: update-status
 update-status: ## Update PRODUCTION_STATUS.md with latest check results
-	python tools/production_readiness_check.py --mode paper --output /tmp/readiness-report.json
-	python tools/update_production_status.py --report /tmp/readiness-report.json --update-phases
+	python tools/production_readiness_check.py --mode paper --output readiness-report.json
+	python tools/update_production_status.py --report readiness-report.json --update-phases
 	@echo ""
 	@echo "PRODUCTION_STATUS.md updated"
 

@@ -94,7 +94,7 @@ class Container:
         # Load strategies (DB > YAML)
         active_strategies = []
         try:
-            db_strategies = await self.database.list_strategies()
+            db_strategies = await self.database.get_strategies()
             active_db_strategies = [s for s in db_strategies if s.is_active]
             if active_db_strategies:
                 for s in active_db_strategies:

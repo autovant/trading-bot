@@ -5,9 +5,7 @@ These tests validate that all critical production components are working correct
 """
 
 import asyncio
-import os
 from pathlib import Path
-from typing import Any, Dict
 
 import pytest
 import yaml
@@ -66,7 +64,7 @@ class TestProductionReadiness:
         assert docker_compose.exists(), "docker-compose.yml not found"
 
         # Check it's valid YAML
-        with open(docker_compose) as f:
+        with open(docker_compose, encoding="utf-8", errors="replace") as f:
             config = yaml.safe_load(f)
 
         assert "services" in config, "docker-compose.yml missing 'services' key"
@@ -93,20 +91,20 @@ class TestProductionReadiness:
         if not config_path.exists():
             pytest.skip("config/strategy.yaml not found")
 
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8", errors="replace") as f:
             config = yaml.safe_load(f)
 
         # Check for critical top-level keys
-        expected_keys = ["mode", "exchange"]
-        for key in expected_keys:
-            assert key in config, f"config/strategy.yaml missing required key: {key}"
+        assert "exchange" in config, "config/strategy.yaml missing required key: exchange"
+        has_mode = "app_mode" in config or "mode" in config
+        assert has_mode, "config/strategy.yaml missing required key: app_mode|mode"
 
     def test_gitignore_excludes_sensitive_files(self):
         """Verify .gitignore excludes sensitive files and patterns."""
         gitignore = Path(".gitignore")
         assert gitignore.exists(), ".gitignore not found"
 
-        with open(gitignore) as f:
+        with open(gitignore, encoding="utf-8", errors="replace") as f:
             content = f.read()
 
         # Check for critical patterns
@@ -151,7 +149,7 @@ class TestProductionReadiness:
         status_doc = Path("PRODUCTION_STATUS.md")
         assert status_doc.exists(), "PRODUCTION_STATUS.md not found"
 
-        with open(status_doc) as f:
+        with open(status_doc, encoding="utf-8", errors="replace") as f:
             content = f.read()
 
         # Check for key sections
@@ -170,7 +168,7 @@ class TestProductionReadiness:
         qa_doc = Path("QA_CHECKLIST.md")
         assert qa_doc.exists(), "QA_CHECKLIST.md not found"
 
-        with open(qa_doc) as f:
+        with open(qa_doc, encoding="utf-8", errors="replace") as f:
             content = f.read()
 
         # Check for test sets
@@ -191,7 +189,7 @@ class TestProductionReadiness:
         requirements = Path("requirements.txt")
         assert requirements.exists(), "requirements.txt not found"
 
-        with open(requirements) as f:
+        with open(requirements, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
 
         # Check for critical packages
@@ -222,7 +220,7 @@ class TestProductionReadiness:
             assert path.suffix == ".py", f"Entry point should be .py file: {entry_point}"
 
             # Check if it has a main guard or entry point
-            with open(path) as f:
+            with open(path, encoding="utf-8", errors="replace") as f:
                 content = f.read()
                 # Most entry points should have __main__ or be importable
                 has_entry = (
@@ -237,7 +235,7 @@ class TestProductionReadiness:
         config_file = Path("src/config.py")
         assert config_file.exists(), "src/config.py not found"
 
-        with open(config_file) as f:
+        with open(config_file, encoding="utf-8", errors="replace") as f:
             content = f.read()
 
         # Check for mode-related code
@@ -284,7 +282,7 @@ class TestProductionReadiness:
         db_file = Path("src/database.py")
         assert db_file.exists(), "Database implementation not found"
 
-        with open(db_file) as f:
+        with open(db_file, encoding="utf-8", errors="replace") as f:
             content = f.read()
 
         # Check for database-related code
@@ -297,7 +295,7 @@ class TestProductionReadiness:
         messaging_file = Path("src/messaging.py")
         assert messaging_file.exists(), "Messaging implementation not found"
 
-        with open(messaging_file) as f:
+        with open(messaging_file, encoding="utf-8", errors="replace") as f:
             content = f.read()
 
         # Check for NATS-related code
@@ -325,7 +323,7 @@ class TestProductionReadiness:
         backtest_file = Path("tools/backtest.py")
         assert backtest_file.exists(), "Backtesting engine not found"
 
-        with open(backtest_file) as f:
+        with open(backtest_file, encoding="utf-8", errors="replace") as f:
             content = f.read()
 
         # Check for backtest-related code
@@ -355,7 +353,7 @@ class TestSafetyFeatures:
         # Check config file has mode validation
         config_file = Path("src/config.py")
         if config_file.exists():
-            with open(config_file) as f:
+            with open(config_file, encoding="utf-8", errors="replace") as f:
                 content = f.read()
             # Look for mode validation
             has_validation = "mode" in content.lower() and (
@@ -376,7 +374,7 @@ class TestSafetyFeatures:
         for file_path in files_to_check:
             path = Path(file_path)
             if path.exists():
-                with open(path) as f:
+                with open(path, encoding="utf-8", errors="replace") as f:
                     content = f.read()
                 if "api" in content.lower() and "key" in content.lower():
                     found_validation = True
@@ -396,7 +394,7 @@ class TestSafetyFeatures:
         for config_file in config_files:
             path = Path(config_file)
             if path.exists():
-                with open(path) as f:
+                with open(path, encoding="utf-8", errors="replace") as f:
                     content = f.read()
                     # Check for risk-related parameters
                     risk_params = [
@@ -426,13 +424,14 @@ class TestMonitoringAndObservability:
         service_files = [
             "src/services/execution.py",
             "src/services/feed.py",
+            "src/services/base.py",
         ]
 
         found_health_check = False
         for service_file in service_files:
             path = Path(service_file)
             if path.exists():
-                with open(path) as f:
+                with open(path, encoding="utf-8", errors="replace") as f:
                     content = f.read()
                 if "health" in content.lower():
                     found_health_check = True
@@ -452,7 +451,7 @@ class TestMonitoringAndObservability:
         for main_file in main_files:
             path = Path(main_file)
             if path.exists():
-                with open(path) as f:
+                with open(path, encoding="utf-8", errors="replace") as f:
                     content = f.read()
                 if "logging" in content.lower() or "logger" in content.lower():
                     found_logging = True

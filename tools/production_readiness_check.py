@@ -7,13 +7,12 @@ It checks configuration, dependencies, safety features, risk management, and mor
 """
 
 import argparse
-import asyncio
 import json
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -51,7 +50,7 @@ class ProductionReadinessChecker:
             elif severity == "warning":
                 self.warnings.append(f"{category} - {name}: {message}")
         else:
-            self.info.append(f"{category} - {name}: ✓")
+            self.info.append(f"{category} - {name}: PASS")
 
     def check_python_version(self) -> bool:
         """Verify Python version compatibility."""
@@ -67,7 +66,7 @@ class ProductionReadinessChecker:
                 "Python Version",
                 passed,
                 f"Python {version.major}.{version.minor}.{version.micro} "
-                f"({'✓' if passed else 'requires >= 3.8'})",
+                f"({'PASS' if passed else 'requires >= 3.8'})",
             )
             return passed
         except Exception as e:
@@ -140,22 +139,29 @@ class ProductionReadinessChecker:
             else:
                 # Validate YAML syntax
                 try:
-                    with open(path) as f:
+                    with open(path, encoding="utf-8") as f:
                         config = yaml.safe_load(f)
                     self.add_check(category, "YAML Syntax", True, "Valid YAML")
 
-                    # Check critical keys
-                    critical_keys = ["mode", "exchange"]
-                    for key in critical_keys:
-                        has_key = key in config
-                        self.add_check(
-                            category,
-                            f"Config Key: {key}",
-                            has_key,
-                            "Present" if has_key else "Missing",
-                        )
-                        if not has_key:
-                            all_passed = False
+                    has_mode_key = "app_mode" in config or "mode" in config
+                    self.add_check(
+                        category,
+                        "Config Key: app_mode|mode",
+                        has_mode_key,
+                        "Present" if has_mode_key else "Missing",
+                    )
+                    if not has_mode_key:
+                        all_passed = False
+
+                    has_exchange_key = "exchange" in config
+                    self.add_check(
+                        category,
+                        "Config Key: exchange",
+                        has_exchange_key,
+                        "Present" if has_exchange_key else "Missing",
+                    )
+                    if not has_exchange_key:
+                        all_passed = False
 
                 except yaml.YAMLError as e:
                     self.add_check(category, "YAML Syntax", False, f"Invalid YAML: {e}")
@@ -360,10 +366,10 @@ class ProductionReadinessChecker:
             return False
 
         # Check for important patterns
-        with open(path) as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             content = f.read()
 
-        important_patterns = [".env", "__pycache__", "*.pyc", "venv", "data/", "logs/"]
+        important_patterns = [".env", "__pycache__", "venv", "data/", "logs/"]
         all_found = True
         for pattern in important_patterns:
             found = pattern in content
@@ -376,6 +382,16 @@ class ProductionReadinessChecker:
                     severity="warning",
                 )
                 all_found = False
+
+        has_pyc_pattern = "*.pyc" in content or "*.py[cod]" in content
+        if not has_pyc_pattern:
+            self.add_check(
+                category,
+                "Pattern: *.pyc|*.py[cod]",
+                False,
+                "Missing Python bytecode ignore pattern",
+                severity="warning",
+            )
 
         if all_found:
             self.add_check(category, ".gitignore", True, "Properly configured")
@@ -458,16 +474,16 @@ class ProductionReadinessChecker:
         critical_failed = any(not results.get(cat, False) for cat in critical_categories)
 
         if critical_failed:
-            return "❌ NOT READY - Critical checks failed. Fix errors before proceeding."
+            return "NOT READY - Critical checks failed. Fix errors before proceeding."
         elif pass_rate >= 95:
             if self.mode == "live":
-                return "✅ PRODUCTION READY - All critical checks passed. Review warnings before live trading."
+                return "PRODUCTION READY - All critical checks passed. Review warnings before live trading."
             else:
-                return f"✅ READY FOR {self.mode.upper()} - All critical checks passed."
+                return f"READY FOR {self.mode.upper()} - All critical checks passed."
         elif pass_rate >= 80:
-            return "⚠️  MOSTLY READY - Some non-critical checks failed. Review and fix warnings."
+            return "MOSTLY READY - Some non-critical checks failed. Review and fix warnings."
         else:
-            return "❌ NOT READY - Multiple checks failed. Address issues before proceeding."
+            return "NOT READY - Multiple checks failed. Address issues before proceeding."
 
     def print_report(self, report: Dict[str, Any]):
         """Print formatted report."""
@@ -481,15 +497,15 @@ class ProductionReadinessChecker:
         summary = report["summary"]
         print(f"Summary:")
         print(f"  Total Checks: {summary['total_checks']}")
-        print(f"  Passed: {summary['passed']} ✓")
-        print(f"  Failed: {summary['failed']} ✗")
+        print(f"  Passed: {summary['passed']} PASS")
+        print(f"  Failed: {summary['failed']} FAIL")
         print(f"  Pass Rate: {summary['pass_rate']:.1f}%")
         print()
 
         # Category breakdown
         print("Category Results:")
         for category, passed in report["category_results"].items():
-            status = "✓" if passed else "✗"
+            status = "PASS" if passed else "FAIL"
             print(f"  {status} {category}")
         print()
 
@@ -497,14 +513,14 @@ class ProductionReadinessChecker:
         if report["errors"]:
             print(f"Errors ({len(report['errors'])}):")
             for error in report["errors"]:
-                print(f"  ✗ {error}")
+                print(f"  FAIL {error}")
             print()
 
         # Warnings
         if report["warnings"]:
             print(f"Warnings ({len(report['warnings'])}):")
             for warning in report["warnings"]:
-                print(f"  ⚠  {warning}")
+                print(f"  WARN {warning}")
             print()
 
         # Recommendation

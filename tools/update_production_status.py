@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 
 def load_readiness_report(report_path: str) -> Dict[str, Any]:
     """Load a production readiness report."""
-    with open(report_path) as f:
+    with open(report_path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -28,7 +28,7 @@ def update_production_status(report: Dict[str, Any], status_file: str = "PRODUCT
         print(f"Warning: {status_file} not found. Creating new file.")
         content = "# Production Readiness Status\n\n"
     else:
-        with open(status_path) as f:
+        with open(status_path, encoding="utf-8", errors="replace") as f:
             content = f.read()
     
     # Extract key metrics
@@ -48,15 +48,15 @@ def update_production_status(report: Dict[str, Any], status_file: str = "PRODUCT
 
 ### Check Summary
 - Total Checks: {summary.get('total_checks', 0)}
-- Passed: {summary.get('passed', 0)} ✓
-- Failed: {summary.get('failed', 0)} ✗
+- Passed: {summary.get('passed', 0)} PASS
+- Failed: {summary.get('failed', 0)} FAIL
 
 ### Category Results
 """
     
     # Add category results
     for category, passed in report.get("category_results", {}).items():
-        status = "✅" if passed else "❌"
+        status = "PASS" if passed else "FAIL"
         status_update += f"- {status} {category}\n"
     
     # Add critical errors if any
@@ -82,10 +82,10 @@ def update_production_status(report: Dict[str, Any], status_file: str = "PRODUCT
         content += "\n" + status_update
     
     # Write updated content
-    with open(status_path, 'w') as f:
+    with open(status_path, 'w', encoding="utf-8") as f:
         f.write(content)
     
-    print(f"✓ Updated {status_file}")
+    print(f"Updated {status_file}")
 
 
 def update_phase_status(status_file: str = "PRODUCTION_STATUS.md"):
@@ -96,8 +96,8 @@ def update_phase_status(status_file: str = "PRODUCTION_STATUS.md"):
         print(f"Error: {status_file} not found")
         return
     
-    with open(status_path) as f:
-        content = f.read()
+        with open(status_path, encoding="utf-8", errors="replace") as f:
+            content = f.read()
     
     # Check if Phase 4 section exists
     if "### Phase 4: Testing & Validation" in content:
@@ -110,7 +110,7 @@ def update_phase_status(status_file: str = "PRODUCTION_STATUS.md"):
         for old, new in updates.items():
             if old in content:
                 content = content.replace(old, new)
-                print(f"✓ Updated: {old}")
+                print(f"Updated: {old}")
     
     # Check if Phase 5 section exists  
     if "### Phase 5: Production Hardening" in content:
@@ -122,7 +122,7 @@ def update_phase_status(status_file: str = "PRODUCTION_STATUS.md"):
         for old, new in updates.items():
             if old in content:
                 content = content.replace(old, new)
-                print(f"✓ Updated: {old}")
+                print(f"Updated: {old}")
     
     # Update last modified date
     if "**Last Updated**:" in content:
@@ -134,10 +134,10 @@ def update_phase_status(status_file: str = "PRODUCTION_STATUS.md"):
             content
         )
     
-    with open(status_path, 'w') as f:
+    with open(status_path, 'w', encoding="utf-8") as f:
         f.write(content)
     
-    print(f"✓ Updated phase status in {status_file}")
+    print(f"Updated phase status in {status_file}")
 
 
 def generate_summary_report(report_paths: List[str], output: str = "production_readiness_summary.md"):
@@ -146,7 +146,7 @@ def generate_summary_report(report_paths: List[str], output: str = "production_r
     reports = []
     for path in report_paths:
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 reports.append(json.load(f))
         except Exception as e:
             print(f"Warning: Could not load {path}: {e}")
@@ -169,7 +169,7 @@ Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         summary_data = report.get('summary', {})
         pass_rate = summary_data.get('pass_rate', 0)
         
-        status_emoji = "✅" if pass_rate >= 90 else "⚠️" if pass_rate >= 70 else "❌"
+        status_emoji = "PASS" if pass_rate >= 90 else "WARN" if pass_rate >= 70 else "FAIL"
         
         summary += f"""### {mode} Mode {status_emoji}
 - Pass Rate: {pass_rate:.1f}%
@@ -189,7 +189,7 @@ Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 #### Category Breakdown
 """
         for category, passed in report.get('category_results', {}).items():
-            status = "✓" if passed else "✗"
+            status = "PASS" if passed else "FAIL"
             summary += f"- {status} {category}\n"
         
         errors = report.get('errors', [])
@@ -207,10 +207,10 @@ Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         summary += "\n"
     
     # Write summary
-    with open(output, 'w') as f:
+    with open(output, 'w', encoding="utf-8") as f:
         f.write(summary)
     
-    print(f"✓ Generated summary report: {output}")
+    print(f"Generated summary report: {output}")
 
 
 def main():

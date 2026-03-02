@@ -32,7 +32,11 @@ async def test_container_initialization(test_config):
         mock_exchange = AsyncMock()
         MockCreateExchange.return_value = mock_exchange
 
+        mock_paper_instance = MockPaper.return_value
+        mock_paper_instance.restore_state = AsyncMock()
+
         mock_db_instance.list_strategies = AsyncMock(return_value=[])
+        mock_db_instance.get_strategies = AsyncMock(return_value=[])
 
         await container.initialize("test_run")
 
@@ -46,6 +50,9 @@ async def test_container_initialization(test_config):
         mock_exchange.initialize.assert_called_once()
 
         assert container.strategy is not None
+        mock_paper_instance.restore_state.assert_called_once()
+
+        await container.shutdown()
 
 
 @pytest.mark.asyncio

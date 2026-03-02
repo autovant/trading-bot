@@ -41,7 +41,7 @@ class RiskService(BaseService):
         self.config = load_config()
         self.set_mode(self.config.app_mode)
 
-        self.database = DatabaseManager(self.config.database.path)
+        self.database = DatabaseManager(self.config.database.url)
         await self.database.initialize()
         self._run_id = (
             f"{self.name}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
@@ -100,7 +100,7 @@ class RiskService(BaseService):
 
             await self.messaging.publish(subject, payload)
 
-            if self.database and self._run_id:
+            if self.database and self._run_id and hasattr(self.database, "record_risk_snapshot"):
                 try:
                     await self.database.record_risk_snapshot(
                         payload, mode=self.config.app_mode, run_id=self._run_id
