@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Any, Dict
 
@@ -39,7 +40,7 @@ class BacktestEngine:
         interval_minutes = interval_map.get(interval, 1)
 
         async with aiohttp.ClientSession() as session:
-            client = ZoomexV3Client(session, base_url="https://openapi.zoomex.com")
+            client = ZoomexV3Client(session, base_url=os.getenv("ZOOMEX_BASE", "https://openapi.zoomex.com"))
 
             all_klines = []
             current_end = end_date

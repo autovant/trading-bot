@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Tuple
 
-import numpy as np
 import pandas as pd
 
 from src.signal_engine.plugins.base import PluginResult, ScoringPlugin
@@ -66,8 +65,6 @@ class StructureLevelsPlugin(ScoringPlugin):
         low = df["low"]
         
         current_close = self.safe_get(close)
-        current_high = self.safe_get(high)
-        current_low = self.safe_get(low)
         
         # Find pivot points
         pivot_highs, pivot_lows = self._find_pivots(high, low, self.PIVOT_LOOKBACK)
@@ -233,10 +230,10 @@ class StructureLevelsPlugin(ScoringPlugin):
             return None
         
         if below:
-            below_levels = [l for l in levels if l < price]
+            below_levels = [lv for lv in levels if lv < price]
             return max(below_levels) if below_levels else None
         else:
-            above_levels = [l for l in levels if l > price]
+            above_levels = [lv for lv in levels if lv > price]
             return min(above_levels) if above_levels else None
     
     def _is_recent_pivot_high(self, high: pd.Series, lookback: int) -> bool:
@@ -285,7 +282,6 @@ class StructureLevelsPlugin(ScoringPlugin):
             return False, 0.0
         
         current_close = df["close"].iloc[-1]
-        current_low = df["low"].iloc[-1]
         
         for level in resistance_levels:
             # Check if current price is above the level

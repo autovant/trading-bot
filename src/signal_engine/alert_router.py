@@ -13,10 +13,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import json
 import logging
 import time
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import aiohttp
 
@@ -34,8 +33,9 @@ class WebSocketManager:
         # Connections per subscription key: (exchange, symbol, tf) -> set of websockets
         self._connections: Dict[tuple, Set] = {}
         self._all_connections: Set = set()
+        self._lock = asyncio.Lock()
     
-    def add_connection(
+    async def add_connection(
         self,
         websocket,
         exchange: Optional[str] = None,
@@ -48,22 +48,24 @@ class WebSocketManager:
         If exchange/symbol/timeframe are provided, subscribe to that specific feed.
         Otherwise, subscribe to all signals.
         """
-        if exchange and symbol and timeframe:
-            key = (exchange, symbol, timeframe)
-            if key not in self._connections:
-                self._connections[key] = set()
-            self._connections[key].add(websocket)
-        
-        self._all_connections.add(websocket)
+        async with self._lock:
+            if exchange and symbol and timeframe:
+                key = (exchange, symbol, timeframe)
+                if key not in self._connections:
+                    self._connections[key] = set()
+                self._connections[key].add(websocket)
+            
+            self._all_connections.add(websocket)
     
-    def remove_connection(self, websocket) -> None:
+    async def remove_connection(self, websocket) -> None:
         """Remove a WebSocket connection."""
-        self._all_connections.discard(websocket)
-        
-        for key in list(self._connections.keys()):
-            self._connections[key].discard(websocket)
-            if not self._connections[key]:
-                del self._connections[key]
+        async with self._lock:
+            self._all_connections.discard(websocket)
+            
+            for key in list(self._connections.keys()):
+                self._connections[key].discard(websocket)
+                if not self._connections[key]:
+                    del self._connections[key]
     
     async def broadcast(self, signal: SignalOutput) -> int:
         """
@@ -74,21 +76,31 @@ class WebSocketManager:
         key = (signal.exchange, signal.symbol, signal.timeframe)
         payload = AlertPayload.from_signal(signal).model_dump_json()
         
-        # Get connections subscribed to this specific feed
-        specific_connections = self._connections.get(key, set())
-        
-        # Combine with all-feed subscribers
-        # (In production, you'd want to differentiate these more carefully)
-        all_to_notify = specific_connections | self._all_connections
+        # Snapshot connections under lock, then send outside lock
+        # to avoid holding the lock during I/O.
+        async with self._lock:
+            specific_connections = self._connections.get(key, set())
+            targets = list(specific_connections | self._all_connections)
         
         notified = 0
-        for ws in list(all_to_notify):
+        failed: List = []
+        for ws in targets:
             try:
                 await ws.send_text(payload)
                 notified += 1
             except Exception as e:
                 logger.warning(f"Failed to send to WebSocket: {e}")
-                self.remove_connection(ws)
+                failed.append(ws)
+        
+        # Remove failed connections under lock
+        if failed:
+            async with self._lock:
+                for ws in failed:
+                    self._all_connections.discard(ws)
+                    for k in list(self._connections.keys()):
+                        self._connections[k].discard(ws)
+                        if not self._connections[k]:
+                            del self._connections[k]
         
         return notified
     
@@ -196,45 +208,6 @@ class WebhookNotifier:
         return False
 
 
-class RedisPubSubInterface:
-    """
-    Interface for Redis Pub/Sub (stub implementation).
-    
-    Can be replaced with actual Redis implementation when needed.
-    """
-    
-    def __init__(self, url: Optional[str] = None, channel: str = "signals"):
-        self.url = url
-        self.channel = channel
-        self._enabled = bool(url)
-        self._client = None
-    
-    async def connect(self) -> bool:
-        """Connect to Redis (stub)."""
-        if not self._enabled:
-            return False
-        
-        # Stub: In production, use aioredis or similar
-        logger.info(f"Redis Pub/Sub stub: would connect to {self.url}")
-        return True
-    
-    async def publish(self, signal: SignalOutput) -> bool:
-        """Publish signal to Redis channel (stub)."""
-        if not self._enabled:
-            return False
-        
-        payload = AlertPayload.from_signal(signal)
-        logger.info(
-            f"Redis Pub/Sub stub: would publish to {self.channel}: "
-            f"{signal.side.value} {signal.symbol}"
-        )
-        return True
-    
-    async def close(self) -> None:
-        """Close Redis connection (stub)."""
-        pass
-
-
 class AlertRouter:
     """
     Routes alerts to multiple destinations.
@@ -242,7 +215,6 @@ class AlertRouter:
     Supports:
     - WebSocket streaming
     - Webhook notifications
-    - Redis Pub/Sub (optional)
     
     Tracks delivered signals for idempotency.
     """
@@ -251,14 +223,11 @@ class AlertRouter:
         self,
         websocket_enabled: bool = True,
         webhooks: Optional[List[WebhookDestination]] = None,
-        redis_url: Optional[str] = None,
-        redis_channel: str = "signals",
     ):
         self.websocket_enabled = websocket_enabled
         
         self.ws_manager = WebSocketManager() if websocket_enabled else None
         self.webhook_notifier = WebhookNotifier(webhooks or [])
-        self.redis = RedisPubSubInterface(redis_url, redis_channel)
         
         # Track delivered signals for idempotency
         self._delivered: Set[str] = set()
@@ -305,15 +274,6 @@ class AlertRouter:
                 logger.error(f"Webhook notifications failed: {e}")
                 results["destinations"]["webhooks"] = {"error": str(e)}
         
-        # Redis Pub/Sub
-        if self.redis._enabled:
-            try:
-                redis_success = await self.redis.publish(signal)
-                results["destinations"]["redis"] = {"success": redis_success}
-            except Exception as e:
-                logger.error(f"Redis publish failed: {e}")
-                results["destinations"]["redis"] = {"success": False, "error": str(e)}
-        
         # Mark as delivered
         self._delivered.add(signal.idempotency_key)
         self._prune_delivered()
@@ -331,9 +291,8 @@ class AlertRouter:
     async def close(self) -> None:
         """Close all connections."""
         await self.webhook_notifier.close()
-        await self.redis.close()
     
-    def add_websocket(
+    async def add_websocket(
         self,
         websocket,
         exchange: Optional[str] = None,
@@ -342,9 +301,9 @@ class AlertRouter:
     ) -> None:
         """Add a WebSocket connection."""
         if self.ws_manager:
-            self.ws_manager.add_connection(websocket, exchange, symbol, timeframe)
+            await self.ws_manager.add_connection(websocket, exchange, symbol, timeframe)
     
-    def remove_websocket(self, websocket) -> None:
+    async def remove_websocket(self, websocket) -> None:
         """Remove a WebSocket connection."""
         if self.ws_manager:
-            self.ws_manager.remove_connection(websocket)
+            await self.ws_manager.remove_connection(websocket)

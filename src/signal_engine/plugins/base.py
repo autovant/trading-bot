@@ -147,7 +147,7 @@ class CompositePlugin(ScoringPlugin):
         all_reasons = []
         all_metadata = {}
         
-        for plugin, weight in zip(self.plugins, self.weights):
+        for plugin, weight in zip(self.plugins, self.weights, strict=True):
             result = plugin.compute(df, strategy)
             total_score += result.score * weight
             all_reasons.extend(result.reasons)

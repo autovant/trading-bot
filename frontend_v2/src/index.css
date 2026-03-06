@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+@theme {
+  --color-neo-bg: #080f1d;
+  --color-neo-panel: #0f1829;
+  --color-neo-panel-alt: #152236;
+  --color-neo-border: rgba(148, 163, 184, 0.35);
+  --color-neo-border-strong: rgba(148, 163, 184, 0.6);
+  
+  --color-neo-cyan: #1bdce2;
+  --color-neo-blue: #2962ff;
+  --color-neo-green: #32d48f;
+  --color-neo-amber: #f5c249;
+  --color-neo-red: #f43f5e;
+  --color-neo-orange: #f97316;
+  
+  --color-neo-text: #f5f7fb;
+  --color-neo-muted: #9db0c9;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-neo-bg);
+    color: var(--color-neo-text);
+    font-family: "Inter", system-ui, -apple-system, sans-serif;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    background: rgba(15, 24, 41, 0.6);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--color-neo-border);
+    border-radius: 1rem;
+    box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+  }
+  
+  .glass-panel-hover {
+    transition: all 0.3s ease;
+  }
+  
+  .glass-panel-hover:hover {
+    border-color: var(--color-neo-cyan);
+    box-shadow: 0 0 15px rgba(27, 220, 226, 0.15);
+  }
+
+  .text-glow {
+    text-shadow: 0 0 10px rgba(27, 220, 226, 0.5);
+  }
+
+  .text-glow-blue {
+    text-shadow: 0 0 10px rgba(41, 98, 255, 0.5);
+  }
+  
+  .neon-button {
+    background: linear-gradient(120deg, var(--color-neo-blue), var(--color-neo-cyan));
+    color: white;
+    font-weight: 600;
+    border: none;
+    border-radius: 0.75rem;
+    transition: all 0.3s ease;
+    box-shadow: 0 0 10px rgba(41, 98, 255, 0.4);
+  }
+  
+  .neon-button:hover {
+    box-shadow: 0 0 20px rgba(27, 220, 226, 0.7);
+    transform: translateY(-1px);
+  }
+}

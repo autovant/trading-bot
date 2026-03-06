@@ -1,31 +1,54 @@
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional, List
+from typing import Any, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import make_asgi_app
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from src.api.middleware.auth import APIKeyMiddleware
 from src.api.middleware.error_handler import AppError, global_exception_handler
 from src.api.middleware.rate_limit import (
     RateLimitExceeded,
     limiter,
     rate_limit_exceeded_handler,
 )
-from prometheus_client import make_asgi_app
-import src.metrics # Initialize metrics
+from src.api.routes.agents import agents_router
+from src.api.routes.agents import get_db as get_db_agents
+from src.api.routes.agents import get_messaging as get_messaging_agents
+from src.api.routes.auth import auth_router
 from src.api.routes.backtest import backtest_router
+from src.api.routes.backtest import get_db as get_db_backtest
+from src.api.routes.data import data_router
+from src.api.routes.intelligence import get_db as get_db_intelligence
+from src.api.routes.intelligence import get_exchange as get_exchange_intelligence
+from src.api.routes.intelligence import intelligence_router
 from src.api.routes.market import get_db, get_exchange, market_router
+from src.api.routes.notifications import get_db as get_db_notifications
+from src.api.routes.notifications import notifications_router
+from src.api.routes.portfolio import get_db as get_db_portfolio
+from src.api.routes.portfolio import portfolio_router
+from src.api.routes.presets import presets_router
+from src.api.routes.risk import get_db as get_db_risk
+from src.api.routes.risk import risk_router
+from src.api.routes.signals import get_db as get_db_signals
+from src.api.routes.signals import signals_router
 from src.api.routes.strategy import get_db as get_db_strategy
 from src.api.routes.strategy import strategy_router
 from src.api.routes.system import get_messaging as get_messaging_fn
 from src.api.routes.system import system_router
+from src.api.routes.vault import get_db as get_db_vault
+from src.api.routes.vault import vault_router
+from src.api.ws import websocket_handler, ws_manager
 from src.config import TradingBotConfig, get_config
 from src.database import DatabaseManager
 from src.exchange import ExchangeClient, create_exchange_client
-from src.messaging import MessagingClient
+from src.logging_config import CorrelationIdMiddleware
+from src.messaging import MessagingClient, MockMessagingClient
 from src.paper_trader import PaperBroker
 
 # Setup logging
@@ -63,26 +86,6 @@ async def get_exchange_dependency() -> ExchangeClient:
 
 def get_messaging_dependency():
     return _state.messaging
-
-
-class MockMessagingClient:
-    async def connect(self, timeout: float = 1.0):
-        logger.warning("Using MockMessagingClient (NATS unavailable)")
-
-    async def close(self):
-        pass
-
-    async def publish(self, subject: str, message: Dict[str, Any]):
-        logger.info(f"Mock publish to {subject}: {message}")
-
-    async def subscribe(self, subject: str, callback: Any):
-        logger.info(f"Mock subscribe to {subject}")
-        return None
-
-    async def request(
-        self, subject: str, message: Dict[str, Any], timeout: float = 1.0
-    ):
-        return None
 
 
 async def _ensure_messaging():
@@ -133,11 +136,17 @@ async def lifespan(app: FastAPI):
         # Don't crash - allow server to start with limited functionality
 
     # Start background tasks
-
+    # Start WebSocket heartbeat and NATS bridge
+    await ws_manager.start_heartbeat()
+    if _state.messaging:
+        await ws_manager.start_nats_bridge(_state.messaging)
 
     yield
 
     # Cleanup
+    await ws_manager.stop_heartbeat()
+    await ws_manager.stop_nats_bridge()
+
     if _state.messaging:
         await _state.messaging.close()
 
@@ -150,14 +159,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Trading Bot API", lifespan=lifespan)
 
-# CORS
+# CORS — configurable origins via CORS_ORIGINS env var
+_cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8080").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Correlation ID middleware
+app.add_middleware(CorrelationIdMiddleware)
+
+# Auth middleware
+app.add_middleware(APIKeyMiddleware)
 
 # Dependency Overrides
 # We use this to wire up the router dependencies to our global state
@@ -165,13 +181,38 @@ app.dependency_overrides[get_db] = get_db_dependency
 app.dependency_overrides[get_exchange] = get_exchange_dependency
 app.dependency_overrides[get_db_strategy] = get_db_dependency
 app.dependency_overrides[get_messaging_fn] = get_messaging_dependency
+app.dependency_overrides[get_db_vault] = get_db_dependency
+app.dependency_overrides[get_db_backtest] = get_db_dependency
+app.dependency_overrides[get_db_agents] = get_db_dependency
+app.dependency_overrides[get_messaging_agents] = get_messaging_dependency
+app.dependency_overrides[get_db_signals] = get_db_dependency
+app.dependency_overrides[get_db_risk] = get_db_dependency
+app.dependency_overrides[get_db_notifications] = get_db_dependency
+app.dependency_overrides[get_db_portfolio] = get_db_dependency
+app.dependency_overrides[get_db_intelligence] = get_db_dependency
+app.dependency_overrides[get_exchange_intelligence] = get_exchange_dependency
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "service": "api-server"}
 
 
 # Include Routers
 app.include_router(system_router)
+app.include_router(auth_router)
 app.include_router(market_router)
 app.include_router(strategy_router)
 app.include_router(backtest_router)
+app.include_router(vault_router)
+app.include_router(agents_router)
+app.include_router(signals_router)
+app.include_router(risk_router)
+app.include_router(data_router)
+app.include_router(presets_router)
+app.include_router(notifications_router)
+app.include_router(portfolio_router)
+app.include_router(intelligence_router)
 
 # Middleware Registration
 # Imports moved to top
@@ -190,38 +231,9 @@ app.add_exception_handler(RequestValidationError, global_exception_handler)
 
 app.mount("/metrics", make_asgi_app())
 
-# --- WebSocket & Connection Manager ---
-from fastapi import WebSocket, WebSocketDisconnect
-
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-
-    async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            try:
-                await connection.send_text(message)
-            except Exception:
-                pass
-
-manager = ConnectionManager()
+# --- WebSocket endpoint using ws_manager ---
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        while True:
-            # Just keep connection alive and echo or listen
-            data = await websocket.receive_text()
-            # Optional: handle frontend messages usually PING/PONG
-            await websocket.send_text(f"Message text was: {data}")
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
+    await websocket_handler(websocket, ws_manager)
 

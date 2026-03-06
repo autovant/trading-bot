@@ -10,22 +10,18 @@ Aggregates plugin scores with:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
 from src.signal_engine.plugins.base import PluginResult, ScoringPlugin
-from src.signal_engine.plugins.trend_regime import TrendRegimePlugin
 from src.signal_engine.plugins.oscillator_confluence import OscillatorConfluencePlugin
-from src.signal_engine.plugins.vwap_mean_reversion import VwapMeanReversionPlugin
 from src.signal_engine.plugins.structure_levels import StructureLevelsPlugin
+from src.signal_engine.plugins.trend_regime import TrendRegimePlugin
+from src.signal_engine.plugins.vwap_mean_reversion import VwapMeanReversionPlugin
 from src.signal_engine.schemas import (
-    FeatureSet,
     GateResult,
-    RegimeLabel,
-    SignalSide,
     StrategyProfile,
 )
 

@@ -14,15 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Dict, Optional, Set
 
 import ccxt.async_support as ccxt
 import pandas as pd
 
 from src.signal_engine.config import timeframe_to_seconds
-from src.signal_engine.schemas import CandleData, SubscriptionConfig
+from src.signal_engine.schemas import SubscriptionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +168,7 @@ class MarketDataService:
                 
                 return df
                 
-            except ccxt.RateLimitExceeded as e:
+            except ccxt.RateLimitExceeded:
                 delay = self.retry_delay * (2 ** attempt)
                 logger.warning(f"Rate limit hit for {exchange_id}, retrying in {delay}s")
                 await asyncio.sleep(delay)

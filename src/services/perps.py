@@ -12,8 +12,8 @@ import pandas as pd
 from src.alerts.base import AlertSink
 from src.alerts.manager import AlertManager
 from src.app_logging.trade_logger import TradeLogger
-from src.config import CrisisModeConfig, PerpsConfig, TradingConfig
-from src.database import DatabaseManager, OrderIntent, Trade
+from src.config import CrisisModeConfig, PerpsConfig, StrategyConfig, TradingConfig
+from src.database import DatabaseManager, OrderIntent
 from src.engine.order_intent_ledger import OrderIntentLedger
 from src.engine.perps_executor import (
     early_exit_reduce_only,
@@ -26,6 +26,7 @@ from src.exchange import ExchangeClient
 from src.exchanges.zoomex_v3 import ZoomexError
 from src.messaging import MessagingClient
 from src.risk.risk_manager import RiskManager
+from src.signal_generator import SignalGenerator
 from src.state.perps_state_store import (
     load_perps_state,
     save_perps_state,
@@ -33,8 +34,6 @@ from src.state.perps_state_store import (
 from src.state.symbol_health_store import SymbolHealthStore
 from src.strategies.perps_trend_atr_multi_tf import compute_signals_multi_tf
 from src.strategies.perps_trend_vwap import compute_signals
-from src.signal_generator import SignalGenerator
-from src.config import StrategyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -462,7 +461,6 @@ class PerpsService:
                      # Prioritize signals - for now pick best Long
                     best = max(valid_signals, key=lambda s: s.confidence)
                     if best.direction == "long":
-                        start_equity = self.config.trading.initial_capital # approximation
                         # Calculate risk-based position size?
                         # PerpsService logic uses _enter_long which does sizing.
                         # We just need to signal 'long_signal'=True and price params.

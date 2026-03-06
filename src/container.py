@@ -4,9 +4,9 @@ from typing import Optional
 import aiohttp
 
 from .config import StrategyConfig, TradingBotConfig
-from .exchanges.bybit_ws import BybitWebsocketClient
 from .database import DatabaseManager
 from .exchange import IExchange, create_exchange_client
+from .exchanges.bybit_ws import BybitWebsocketClient
 from .messaging import MessagingClient, MockMessagingClient
 from .paper_trader import PaperBroker
 from .presets import get_preset_strategies

@@ -9,13 +9,13 @@ This module provides:
 """
 
 from src.signal_engine.schemas import (
+    AlertPayload,
     CandleData,
     FeatureSet,
-    SignalOutput,
-    AlertPayload,
-    SubscriptionConfig,
-    StrategyProfile,
     GateResult,
+    SignalOutput,
+    StrategyProfile,
+    SubscriptionConfig,
 )
 
 __all__ = [

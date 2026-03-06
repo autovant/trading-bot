@@ -10,10 +10,15 @@ from typing import Any, Dict, List, Optional
 
 import ccxt.async_support as ccxt
 import pandas as pd
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from ..config import ExchangeConfig
 from ..models import OrderResponse, OrderType, PositionSnapshot, Side
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 retry_read = retry(
     retry=retry_if_exception_type((ccxt.NetworkError, ccxt.RequestTimeout, ccxt.ExchangeNotAvailable, ccxt.RateLimitExceeded)),
@@ -30,6 +35,9 @@ class CCXTClient:
     Wrapper around CCXT for unified exchange interaction.
     """
 
+    # Quote currencies to try when splitting concatenated symbols like SOLUSDT
+    _QUOTE_CURRENCIES = ("USDT", "USDC", "USD", "BUSD", "BTC", "ETH")
+
     def __init__(self, config: ExchangeConfig):
         self.config = config
         self.exchange_id = config.name.lower()
@@ -37,6 +45,60 @@ class CCXTClient:
         self._initialized = False
         self._time_offset_ms = 0
         self._last_time_sync = 0.0
+
+    def _normalize_symbol(self, symbol: str) -> str:
+        """Convert concatenated symbols (SOLUSDT) to CCXT format (SOL/USDT).
+
+        If the symbol already contains '/', return as-is.
+        Tries the loaded markets first, then splits by known quote currencies.
+        For futures, also checks BASE/QUOTE:QUOTE format.
+        """
+        if "/" in symbol:
+            return symbol
+
+        # Check if the raw symbol exists in markets (e.g. some exchanges accept it)
+        if self.exchange and symbol in self.exchange.markets:
+            return symbol
+
+        # Try to split into BASE/QUOTE
+        upper = symbol.upper()
+        for quote in self._QUOTE_CURRENCIES:
+            if upper.endswith(quote) and len(upper) > len(quote):
+                base = upper[: -len(quote)]
+                candidate = f"{base}/{quote}"
+                # Check spot first
+                if self.exchange and candidate in self.exchange.markets:
+                    return candidate
+                # Check futures (BASE/QUOTE:QUOTE)
+                futures_candidate = f"{candidate}:{quote}"
+                if self.exchange and futures_candidate in self.exchange.markets:
+                    return futures_candidate
+                # If exchange not loaded yet, return spot format
+                if not self.exchange:
+                    return candidate
+
+        # Fallback: return as-is and let CCXT raise if invalid
+        return symbol
+
+    @staticmethod
+    def _normalize_timeframe(timeframe: str) -> str:
+        """Convert bare numeric timeframes to CCXT format.
+
+        '5' → '5m', '60' → '1h', '1440' → '1d', '1h' → '1h' (unchanged).
+        """
+        # Already contains a unit suffix
+        if timeframe and timeframe[-1] in ("m", "h", "d", "w", "M"):
+            return timeframe
+        # Bare number → treat as minutes
+        try:
+            minutes = int(timeframe)
+        except (ValueError, TypeError):
+            return timeframe  # Can't parse, return as-is
+        if minutes >= 1440 and minutes % 1440 == 0:
+            return f"{minutes // 1440}d"
+        if minutes >= 60 and minutes % 60 == 0:
+            return f"{minutes // 60}h"
+        return f"{minutes}m"
 
     @property
     def time_offset_ms(self) -> int:
@@ -108,6 +170,8 @@ class CCXTClient:
         if not self.exchange:
             return None
 
+        symbol = self._normalize_symbol(symbol)
+        timeframe = self._normalize_timeframe(timeframe)
         try:
             ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
 
@@ -126,6 +190,7 @@ class CCXTClient:
         if not self.exchange:
             return None
 
+        symbol = self._normalize_symbol(symbol)
         try:
             ticker = await self.exchange.fetch_ticker(symbol)
             return ticker
@@ -139,6 +204,7 @@ class CCXTClient:
         if not self.exchange:
             return None
 
+        symbol = self._normalize_symbol(symbol)
         try:
             order_book = await self.exchange.fetch_order_book(symbol, limit)
             return order_book
@@ -169,6 +235,8 @@ class CCXTClient:
 
         try:
             # CCXT unified position fetching
+            if symbols:
+                symbols = [self._normalize_symbol(s) for s in symbols]
             positions = await self.exchange.fetch_positions(symbols)
             snapshots = []
 
@@ -208,6 +276,7 @@ class CCXTClient:
         if not self.exchange:
             return None
 
+        symbol = self._normalize_symbol(symbol)
         try:
             params: Dict[str, Any] = {}
             if reduce_only:
@@ -256,6 +325,7 @@ class CCXTClient:
         if not hasattr(self.exchange, "set_leverage"):
             logger.warning("Exchange does not support set_leverage via CCXT")
             return
+        symbol = self._normalize_symbol(symbol)
         await self.exchange.set_leverage(leverage, symbol)
 
     @retry_read
@@ -264,6 +334,8 @@ class CCXTClient:
     ) -> Optional[Dict[str, Any]]:
         if not self.exchange:
             return None
+        if symbol:
+            symbol = self._normalize_symbol(symbol)
         try:
             if symbol:
                 return await self.exchange.cancel_order(order_id, symbol)
@@ -276,6 +348,8 @@ class CCXTClient:
     async def cancel_all_orders(self, symbol: str) -> List[Dict[str, Any]]:
         if not self.exchange:
             return []
+
+        symbol = self._normalize_symbol(symbol)
 
         if hasattr(self.exchange, "cancel_all_orders"):
             try:
@@ -309,6 +383,7 @@ class CCXTClient:
             return []
         try:
             if symbol:
+                symbol = self._normalize_symbol(symbol)
                 return await self.exchange.fetch_open_orders(symbol)
             return await self.exchange.fetch_open_orders()
         except Exception as e:
@@ -323,6 +398,7 @@ class CCXTClient:
             return []
         try:
             if symbol:
+                symbol = self._normalize_symbol(symbol)
                 return await self.exchange.fetch_my_trades(symbol)
             return await self.exchange.fetch_my_trades()
         except Exception as e:

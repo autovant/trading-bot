@@ -1,13 +1,12 @@
 import asyncio
-import hmac
 import hashlib
+import hmac
 import json
 import logging
 import time
-from typing import Dict, Any, Callable, Optional, List
+from typing import Any, Dict, List
 
 import websockets
-
 
 from ..messaging import MessagingClient
 

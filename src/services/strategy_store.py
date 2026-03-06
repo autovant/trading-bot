@@ -31,7 +31,7 @@ class StrategyService:
         # The current create_strategy does INSERT.
         # The current update_strategy does UPDATE.
 
-        existing = await self.database.get_strategy(name)
+        existing = await self.database.get_strategy_by_name(name)
         if existing:
             strategy.id = existing.id
             strategy.is_active = existing.is_active
@@ -42,14 +42,14 @@ class StrategyService:
 
     async def get_strategy(self, name: str) -> Optional[Dict[str, Any]]:
         """Get a strategy by name."""
-        strategy = await self.database.get_strategy(name)
+        strategy = await self.database.get_strategy_by_name(name)
         if not strategy:
             return None
         return strategy.config
 
     async def list_strategies(self) -> List[Dict[str, Any]]:
         """List all strategies."""
-        strategies = await self.database.list_strategies()
+        strategies = await self.database.get_strategies()
         return [
             {
                 "id": s.id,
@@ -64,7 +64,7 @@ class StrategyService:
 
     async def activate_strategy(self, name: str) -> bool:
         """Activate a strategy and deactivate others."""
-        strategy = await self.database.get_strategy(name)
+        strategy = await self.database.get_strategy_by_name(name)
         if not strategy:
             return False
 
@@ -72,8 +72,11 @@ class StrategyService:
         return await self.database.update_strategy(strategy)
 
     async def delete_strategy(self, name: str) -> bool:
-        """Delete a strategy."""
-        return await self.database.delete_strategy(name)
+        """Delete a strategy by deactivating it (no hard delete in DB)."""
+        strategy = await self.database.get_strategy_by_name(name)
+        if not strategy or strategy.id is None:
+            return False
+        return await self.database.toggle_strategy_active(strategy.id, False)
 
 
 class StrategyStore:

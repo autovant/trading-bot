@@ -1,28 +1,27 @@
 import asyncio
-from datetime import datetime, timezone
-from typing import Dict, Any, cast
 
-from fastapi import APIRouter, HTTPException, Depends, Security, status
-from fastapi.security import APIKeyHeader
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, REGISTRY, Gauge
-from fastapi.responses import Response
-import yaml
-from pathlib import Path
-
-from src.config import (
-    APP_MODE,
-    TradingBotConfig,
-    load_config,
-    reload_config,
-    get_config,
-)
-from src.api.models import (
-    ModeResponse,
-    ModeRequest,
-    BotStatusResponse,
-)
 # We need logging
 import logging
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict
+
+import yaml
+from fastapi import APIRouter, Depends, HTTPException, Security, status
+from fastapi.responses import Response
+from fastapi.security import APIKeyHeader
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, Gauge, generate_latest
+
+from src.api.models import (
+    BotStatusResponse,
+    ModeRequest,
+    ModeResponse,
+)
+from src.config import (
+    get_config,
+    reload_config,
+)
+
 logger = logging.getLogger(__name__)
 
 system_router = APIRouter()
@@ -32,9 +31,15 @@ API_KEY_NAME = "X-API-KEY"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
 async def get_api_key(api_key_header: str = Security(api_key_header)):
+    import hmac
     import os
-    expected_key = os.getenv("API_KEY", "default-insecure-key")
-    if api_key_header == expected_key:
+    expected_key = os.getenv("API_KEY")
+    if not expected_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="API key not configured",
+        )
+    if hmac.compare_digest(api_key_header or "", expected_key):
         return api_key_header
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -76,10 +81,11 @@ async def _publish_config_reload(version: str, config_body: Dict[str, Any], mess
     if not messaging:
         return
     
+    config = get_config()
     subject = "config.reload" # simplified for refactor
     payload = {
         "version": version,
-        "mode": "live", # Placeholder
+        "mode": config.app_mode,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     try:

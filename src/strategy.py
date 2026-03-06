@@ -4,13 +4,13 @@ ladder entries, dual stops, and crisis mode.
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-import json
 from .config import TradingBotConfig
 from .database import DatabaseManager, Order, Position, Trade
 from .dynamic_strategy import DynamicStrategyEngine
@@ -238,7 +238,7 @@ class TradingStrategy:
                             {
                                 "symbol": symbol,
                                 "timeframe": tf_name,
-                                "timestamp": datetime.now().isoformat(),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
                                 "data": {
                                     "open": float(data["open"].iloc[-1]),
                                     "high": float(data["high"].iloc[-1]),
@@ -259,7 +259,7 @@ class TradingStrategy:
                     self.config.messaging.subjects["market_data"],
                     {
                         "type": "market_data_update",
-                        "timestamp": datetime.now().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                         "updates": market_updates,
                     },
                 )
@@ -680,7 +680,7 @@ class TradingStrategy:
                 "total_pnl": self.total_pnl,
                 "max_drawdown": self.max_drawdown,
                 "current_equity": self.peak_equity + self.total_pnl,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
             await self.messaging.publish(

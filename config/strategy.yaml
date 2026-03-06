@@ -20,9 +20,9 @@ database:
   backup_interval: 3600
   url: sqlite:///data/trades.db
 exchange:
-  base_url: https://api-testnet.bybit.com
-  name: bybit
-  testnet: true
+  base_url: https://www.okx.com
+  name: okx
+  testnet: false
 logging:
   backup_count: 5
   file: logs/trading.log
@@ -62,7 +62,7 @@ perps:
   consecutiveLossLimit: null
   earlyExitOnCross: false
   enabled: true
-  exchange: zoomex
+  exchange: okx
   interval: '5'
   leverage: 1
   mode: oneway
@@ -73,10 +73,10 @@ perps:
   takeProfitPct: 0.03
   triggerBy: LastPrice
   useAdvancedStrategy: true
-  useTestnet: true
+  useTestnet: false
 replay:
   end: '2024-12-31'
-  source: parquet://bars/
+  source: parquet://sample_data/
   speed: 10x
   start: '2023-01-01'
 risk_management:

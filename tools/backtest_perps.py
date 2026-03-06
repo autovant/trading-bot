@@ -488,7 +488,7 @@ class ZoomexDataProvider:
         base_url = (
             "https://openapi-testnet.zoomex.com"
             if self.use_testnet
-            else (self.base_url or "https://openapi.zoomex.com")
+            else (self.base_url or os.getenv("ZOOMEX_BASE", "https://openapi.zoomex.com"))
         )
         start_dt = pd.to_datetime(start_date).tz_localize("UTC")
         end_dt = pd.to_datetime(end_date).tz_localize("UTC")

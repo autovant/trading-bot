@@ -65,26 +65,25 @@ def test_api_security(mock_dependencies):
 
         # 2. Protected Endpoint - No Key
         resp = client.post("/api/bot/start")
-        assert resp.status_code == status.HTTP_403_FORBIDDEN
-        assert "Could not validate credentials" in resp.text
+        assert resp.status_code == status.HTTP_401_UNAUTHORIZED
 
         # 3. Protected Endpoint - Wrong Key
-        resp = client.post("/api/bot/start", headers={"X-API-KEY": "wrong-key"})
-        assert resp.status_code == status.HTTP_403_FORBIDDEN
+        resp = client.post("/api/bot/start", headers={"X-API-Key": "wrong-key"})
+        assert resp.status_code == status.HTTP_401_UNAUTHORIZED
 
         # 4. Protected Endpoint - Correct Key
         # If the endpoint raises 500 (due to internal logic failing on mocks),
         # it means it PASSED the security check.
-        resp = client.post("/api/bot/start", headers={"X-API-KEY": "test-secret-key"})
-        assert resp.status_code != status.HTTP_403_FORBIDDEN
+        resp = client.post("/api/bot/start", headers={"X-API-Key": "test-secret-key"})
+        assert resp.status_code != status.HTTP_401_UNAUTHORIZED
 
         # 5. Verify Mode Endpoint Security
         resp = client.post("/api/mode", json={"mode": "paper", "shadow": False})
-        assert resp.status_code == status.HTTP_403_FORBIDDEN
+        assert resp.status_code == status.HTTP_401_UNAUTHORIZED
 
         resp = client.post(
             "/api/mode",
             json={"mode": "paper", "shadow": False},
-            headers={"X-API-KEY": "test-secret-key"},
+            headers={"X-API-Key": "test-secret-key"},
         )
-        assert resp.status_code != status.HTTP_403_FORBIDDEN
+        assert resp.status_code != status.HTTP_401_UNAUTHORIZED

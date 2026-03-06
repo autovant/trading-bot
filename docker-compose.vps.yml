@@ -1,0 +1,116 @@
+# docker-compose.vps.yml  —  VPS Override
+#
+# Deploy only the latency-sensitive services on a VPS co-located with
+# exchange servers. Non-critical services (frontend, grafana, backups,
+# reporter, replay, agents) stay on the local machine.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.vps.yml up -d
+#
+# NATS runs as a leaf node that bridges to the local NATS cluster via
+# WireGuard VPN (see scripts/setup_wireguard.sh).
+# ──────────────────────────────────────────────────────────────────────
+
+services:
+  # ── Core infrastructure ──────────────────────────────────────────
+
+  postgres:
+    # Standalone on VPS — local machine reads via WireGuard replica or API
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tradingbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-tradingbot}
+    volumes:
+      - vps_pg_data:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  nats:
+    # NATS leaf node bridges to the home NATS cluster
+    command:
+      - "--http_port"
+      - "8222"
+      - "--leafnodes"
+      - "nats-leaf://0.0.0.0:7422"
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+      - "7422:7422"
+    environment:
+      NATS_LEAF_REMOTE_URL: ${NATS_LEAF_REMOTE_URL:-nats://home:7422}
+
+  # ── Latency-sensitive services ───────────────────────────────────
+
+  strategy-engine:
+    environment:
+      APP_MODE: ${APP_MODE:-live}
+      VPS_MODE: "true"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2"
+
+  execution:
+    environment:
+      APP_MODE: ${APP_MODE:-live}
+      VPS_MODE: "true"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1"
+
+  feature-engine:
+    environment:
+      APP_MODE: ${APP_MODE:-live}
+      VPS_MODE: "true"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1"
+
+  signal-engine:
+    environment:
+      APP_MODE: ${APP_MODE:-live}
+      VPS_MODE: "true"
+
+  risk-state:
+    environment:
+      APP_MODE: ${APP_MODE:-live}
+      VPS_MODE: "true"
+
+  # ── Disable non-essential services on VPS ────────────────────────
+
+  api-server:
+    profiles: ["local-only"]
+
+  frontend:
+    profiles: ["local-only"]
+
+  reporter:
+    profiles: ["local-only"]
+
+  replay-service:
+    profiles: ["local-only"]
+
+  agent-orchestrator:
+    profiles: ["local-only"]
+
+  copilot-proxy:
+    profiles: ["local-only"]
+
+  prometheus:
+    profiles: ["local-only"]
+
+  grafana:
+    profiles: ["local-only"]
+
+  db-backup:
+    profiles: ["local-only"]
+
+volumes:
+  vps_pg_data:

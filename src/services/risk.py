@@ -1,16 +1,14 @@
 """
 Risk state publisher implemented with FastAPI.
 
-Emits synthetic risk metrics at a fixed cadence to keep downstream
-consumers (strategy, dashboard) informed even in paper environments.
+Computes real risk metrics from database positions and PnL, then publishes
+to downstream consumers (strategy, dashboard) at a fixed cadence.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import math
-import random
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -26,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class RiskService(BaseService):
-    """Synthetic risk-state publisher."""
+    """Real risk-state publisher derived from database positions and PnL."""
 
     def __init__(self) -> None:
         super().__init__("risk")
@@ -35,7 +33,9 @@ class RiskService(BaseService):
         self._task: Optional[asyncio.Task] = None
         self.database: Optional[DatabaseManager] = None
         self._run_id: Optional[str] = None
-        random.seed()
+        self._peak_equity: float = 0.0
+        self._consecutive_losses: int = 0
+        self._crisis: bool = False
 
     async def on_startup(self) -> None:
         self.config = load_config()
@@ -70,42 +70,85 @@ class RiskService(BaseService):
             self.database = None
 
     async def _run(self) -> None:
-        if self.config is None or self.messaging is None:
+        if self.config is None or self.messaging is None or self.database is None:
             raise RuntimeError("RiskService started before initialisation")
         subject = self.config.messaging.subjects["risk"]
-
-        consecutive_losses = 0
-        crisis = False
+        mode = self.config.app_mode
 
         while True:
-            drawdown = abs(math.sin(datetime.now(timezone.utc).timestamp())) * 0.2
-            volatility = random.random()
-            position_factor = 1 - random.random() * 0.3
+            # --- Compute real metrics from DB ---
+            drawdown = 0.0
+            position_factor = 1.0
 
-            previous_crisis = crisis
-            if random.random() < 0.05:
-                crisis = not crisis
-                if crisis:
-                    consecutive_losses += 1
-            if crisis and not previous_crisis and self.config:
-                CIRCUIT_BREAKERS.labels(mode=self.config.app_mode).inc()
+            # Get recent PnL to compute drawdown and consecutive losses
+            try:
+                pnl_history = await self.database.get_pnl_history(days=30)
+                if pnl_history:
+                    # Track peak equity from balance column
+                    latest_balance = pnl_history[0].balance if pnl_history else 0.0
+                    for entry in pnl_history:
+                        if entry.balance > self._peak_equity:
+                            self._peak_equity = entry.balance
+
+                    if self._peak_equity > 0:
+                        drawdown = max(0.0, (self._peak_equity - latest_balance) / self._peak_equity)
+
+                    # Count consecutive losses from most recent entries
+                    losses = 0
+                    for entry in pnl_history:
+                        if entry.net_pnl < 0:
+                            losses += 1
+                        else:
+                            break
+                    self._consecutive_losses = losses
+            except Exception as exc:
+                logger.debug("PnL query failed (ok on first run): %s", exc)
+
+            # Get open positions to compute exposure-based position factor
+            try:
+                positions = await self.database.get_positions(mode=mode, run_id=self._run_id)
+                if positions and self._peak_equity > 0:
+                    total_exposure = sum(abs(p.size * p.mark_price) for p in positions)
+                    exposure_ratio = total_exposure / self._peak_equity
+                    # Scale factor: full size at <50% exposure, reduced above
+                    position_factor = max(0.1, 1.0 - max(0.0, exposure_ratio - 0.5))
+            except Exception as exc:
+                logger.debug("Position query failed (ok on first run): %s", exc)
+
+            # Crisis mode: triggered by excessive drawdown or consecutive losses
+            previous_crisis = self._crisis
+            crisis_threshold = self.config.risk.get("crisis_drawdown", 0.10) if hasattr(self.config, "risk") and isinstance(getattr(self.config, "risk", None), dict) else 0.10
+            loss_threshold = 5
+
+            if drawdown >= crisis_threshold or self._consecutive_losses >= loss_threshold:
+                self._crisis = True
+            elif drawdown < crisis_threshold * 0.5 and self._consecutive_losses < loss_threshold // 2:
+                self._crisis = False
+
+            if self._crisis and not previous_crisis:
+                CIRCUIT_BREAKERS.labels(mode=mode).inc()
+                logger.warning("Crisis mode ACTIVATED: drawdown=%.2f%%, consecutive_losses=%d",
+                               drawdown * 100, self._consecutive_losses)
+            elif not self._crisis and previous_crisis:
+                logger.info("Crisis mode deactivated")
+
             payload = {
-                "crisis_mode": crisis,
-                "consecutive_losses": consecutive_losses,
-                "drawdown": drawdown,
-                "volatility": volatility,
-                "position_size_factor": position_factor,
+                "crisis_mode": self._crisis,
+                "consecutive_losses": self._consecutive_losses,
+                "drawdown": round(drawdown, 6),
+                "volatility": 0.0,  # Populated by downstream market data consumers
+                "position_size_factor": round(position_factor, 4),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
             await self.messaging.publish(subject, payload)
 
-            if self.database and self._run_id and hasattr(self.database, "record_risk_snapshot"):
+            if self._run_id and hasattr(self.database, "record_risk_snapshot"):
                 try:
                     await self.database.record_risk_snapshot(
-                        payload, mode=self.config.app_mode, run_id=self._run_id
+                        payload, mode=mode, run_id=self._run_id
                     )
-                except Exception as exc:  # pragma: no cover - defensive logging
+                except Exception as exc:
                     logger.error("Failed to persist risk snapshot: %s", exc)
 
             await asyncio.sleep(5.0)

@@ -90,8 +90,8 @@ class StrictModel(BaseModel):
 
 
 class ExchangeConfig(StrictModel):
-    provider: Literal["bybit", "zoomex"] = "bybit"
-    name: str = "bybit"
+    provider: str = "okx"
+    name: str = "okx"
     api_key: Optional[str] = Field(default=None, description="API key for venue access")
     secret_key: Optional[str] = Field(
         default=None, description="Secret key / signing secret"
@@ -103,7 +103,7 @@ class ExchangeConfig(StrictModel):
 
 class PerpsConfig(StrictModel):
     enabled: bool = False
-    exchange: Literal["zoomex"] = "zoomex"
+    exchange: str = "okx"
     symbol: str = "SOLUSDT"
     interval: str = "5"
     leverage: int = Field(default=1, ge=1)
@@ -382,11 +382,20 @@ class LoggingConfig(StrictModel):
 
 class DatabaseConfig(StrictModel):
     url: str = Field(
-        default="sqlite:///data/trades.db"
+        default_factory=lambda: os.getenv("DATABASE_URL", "sqlite:///data/trades.db")
     )
     min_pool_size: int = Field(default=5, ge=1)
     max_pool_size: int = Field(default=20, ge=1)
     backup_interval: int = Field(default=3600, ge=0)
+
+    @field_validator("url")
+    @classmethod
+    def _apply_env_override(cls, value: str) -> str:
+        # DATABASE_URL env var always overrides YAML/default
+        db_url = os.getenv("DATABASE_URL")
+        if db_url:
+            return db_url
+        return value
 
 
 class BacktestingConfig(StrictModel):
@@ -405,7 +414,7 @@ class DashboardConfig(StrictModel):
 
 
 class MessagingConfig(StrictModel):
-    servers: List[str] = Field(default_factory=lambda: ["nats://localhost:4222"])
+    servers: List[str] = Field(default_factory=lambda: [os.getenv("NATS_URL", "nats://localhost:4222")])
     subjects: Dict[str, str] = Field(
         default_factory=lambda: {
             "market_data": "market.data",
@@ -424,6 +433,10 @@ class MessagingConfig(StrictModel):
     @field_validator("servers")
     @classmethod
     def _ensure_servers(cls, value: List[str]) -> List[str]:
+        # NATS_URL env var always overrides YAML/default servers
+        nats_url = os.getenv("NATS_URL")
+        if nats_url:
+            return [nats_url]
         if not value:
             raise ValueError("At least one NATS server must be configured.")
         return value
@@ -498,6 +511,91 @@ class ReplayConfig(StrictModel):
         if not multiplier.isdigit() or int(multiplier) <= 0:
             raise ValueError("Replay speed multiplier must be a positive integer.")
         return value
+
+
+class AgentTarget(StrictModel):
+    """Target market/asset configuration for an agent."""
+    symbols: List[str] = Field(default_factory=lambda: ["BTCUSDT"])
+    timeframes: List[str] = Field(default_factory=lambda: ["1h", "4h"])
+    exchange: str = "bybit"
+
+
+class AgentRiskGuardrails(StrictModel):
+    """Risk limits for an individual agent."""
+    max_position_size_usd: float = Field(default=1000.0, ge=0)
+    max_leverage: float = Field(default=3.0, ge=1.0)
+    max_drawdown_pct: float = Field(default=0.10, ge=0, le=1)
+    max_daily_loss_usd: float = Field(default=100.0, ge=0)
+    max_open_positions: int = Field(default=3, ge=1)
+    max_correlation: float = Field(default=0.7, ge=0, le=1)
+    kill_switch_drawdown_pct: float = Field(default=0.20, ge=0, le=1)
+
+
+class ProgressiveRiskConfig(StrictModel):
+    """Progressive risk reduction thresholds."""
+    tier1_drawdown_pct: float = Field(default=0.03, ge=0, le=1)
+    tier1_size_reduction: float = Field(default=0.30, ge=0, le=1)
+    tier2_drawdown_pct: float = Field(default=0.05, ge=0, le=1)
+    tier2_size_reduction: float = Field(default=0.50, ge=0, le=1)
+    tier3_drawdown_pct: float = Field(default=0.10, ge=0, le=1)
+    tier3_size_reduction: float = Field(default=0.80, ge=0, le=1)
+    pause_drawdown_pct: float = Field(default=0.15, ge=0, le=1)
+    cooldown_cycles: int = Field(default=5, ge=1)
+    llm_postmortem_after_losses: int = Field(default=5, ge=1)
+
+
+class SelfLearningConfig(StrictModel):
+    """Configuration for the self-learning loop."""
+    enabled: bool = True
+    mini_backtest_days: int = Field(default=7, ge=1, le=90)
+    min_trades_for_evaluation: int = Field(default=2, ge=1)
+    sharpe_improvement_threshold: float = Field(default=0.1, ge=0)
+    win_rate_improvement_threshold: float = Field(default=0.05, ge=0, le=1)
+    max_candidates_per_cycle: int = Field(default=5, ge=1, le=20)
+    cross_agent_learning: bool = True
+    walk_forward_schedule_hours: int = Field(default=24, ge=1)
+    progressive_risk: ProgressiveRiskConfig = Field(default_factory=ProgressiveRiskConfig)
+
+
+class AgentBacktestRequirements(StrictModel):
+    """Minimum backtest performance to pass the gate."""
+    min_sharpe: float = Field(default=1.0, ge=0)
+    min_profit_factor: float = Field(default=1.2, ge=0)
+    max_drawdown_pct: float = Field(default=0.15, ge=0, le=1)
+    min_trades: int = Field(default=30, ge=1)
+    min_win_rate: float = Field(default=0.40, ge=0, le=1)
+
+
+class AgentPaperRequirements(StrictModel):
+    """Minimum paper trading performance to advance to live."""
+    min_days: int = Field(default=14, ge=1)
+    performance_tolerance_pct: float = Field(default=0.20, ge=0, le=1)
+    min_trades: int = Field(default=10, ge=1)
+
+
+class AgentSchedule(StrictModel):
+    """When the agent runs and how often it rebalances."""
+    rebalance_interval_seconds: int = Field(default=300, ge=10)
+    active_hours_utc: Optional[List[int]] = None  # e.g. [0,1,2,...,23] or None for 24/7
+    pause_on_weekends: bool = False
+
+
+class AgentConfig(StrictModel):
+    """Complete configuration for an autonomous trading agent."""
+    name: str
+    description: str = ""
+    strategy_id: Optional[int] = None
+    strategy_name: Optional[str] = None  # Key from strategy registry
+    strategy_params: Optional[Dict[str, Any]] = None  # Parameter overrides
+    target: AgentTarget = Field(default_factory=AgentTarget)
+    risk_guardrails: AgentRiskGuardrails = Field(default_factory=AgentRiskGuardrails)
+    backtest_requirements: AgentBacktestRequirements = Field(default_factory=AgentBacktestRequirements)
+    paper_requirements: AgentPaperRequirements = Field(default_factory=AgentPaperRequirements)
+    schedule: AgentSchedule = Field(default_factory=AgentSchedule)
+    self_learning: SelfLearningConfig = Field(default_factory=SelfLearningConfig)
+    allocation_usd: float = Field(default=1000.0, ge=0)
+    llm_model: str = "gemini-2.0-flash"
+    llm_temperature: float = Field(default=0.3, ge=0, le=2)
 
 
 class ConfigPaths(StrictModel):

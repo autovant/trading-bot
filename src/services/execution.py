@@ -53,12 +53,14 @@ class ExecutionService(BaseService):
         self._subscriptions: List[Subscription] = []
         self._order_attempts = 0
         self._order_rejections = 0
+        # Map client_id → agent_id for execution report enrichment
+        self._client_agent_map: Dict[str, int] = {}
 
     async def on_startup(self) -> None:
         self.config = load_config()
         self.set_mode(self.config.app_mode)
 
-        self.database = DatabaseManager(self.config.database.path)
+        self.database = DatabaseManager(self.config.database.url)
         await self.database.initialize()
 
         self.messaging = MessagingClient({"servers": self.config.messaging.servers})
@@ -119,6 +121,12 @@ class ExecutionService(BaseService):
             return
 
         try:
+            # Enrich with agent_id from the original order
+            client_id = report.get("client_id", "")
+            agent_id = self._client_agent_map.pop(client_id, None)
+            if agent_id is not None:
+                report["agent_id"] = agent_id
+
             subject = (
                 self.config.messaging.subjects["executions_shadow"]
                 if report.get("is_shadow")
@@ -149,17 +157,23 @@ class ExecutionService(BaseService):
 
         self._order_attempts += 1
 
+        # Track agent_id for execution report enrichment
+        client_id = payload.get("client_id") or payload.get("idempotency_key")
+        agent_id = payload.get("agent_id")
+        if client_id and agent_id is not None:
+            self._client_agent_map[client_id] = agent_id
+
         try:
             order = await self.broker.place_order(
                 symbol=payload["symbol"],
                 side=payload["side"],
-                order_type=payload.get("type", "market"),
+                order_type=payload.get("order_type", payload.get("type", "market")),
                 quantity=float(payload["quantity"]),
                 price=payload.get("price"),
                 stop_price=payload.get("stop_price"),
                 reduce_only=payload.get("reduce_only", False),
                 is_shadow=payload.get("is_shadow", False),
-                client_id=payload.get("client_id"),
+                client_id=client_id,
             )
 
             ORDER_ACCEPTED.labels(status="accepted").inc()
@@ -169,6 +183,7 @@ class ExecutionService(BaseService):
                 "order_id": order.order_id or order.client_id,
                 "client_id": order.client_id,
                 "symbol": order.symbol,
+                "side": payload.get("side"),
                 "executed": False,
                 "mode": self.config.app_mode,
                 "run_id": self.broker.run_id if self.broker else "",
@@ -178,6 +193,7 @@ class ExecutionService(BaseService):
                 "price": order.price,
                 "quantity": order.quantity,
                 "is_shadow": payload.get("is_shadow", False),
+                "agent_id": agent_id,
             }
 
             await self.messaging.publish(

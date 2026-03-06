@@ -298,12 +298,12 @@ class PaperBroker:
             await self._fill_resting_limit(rest, snap)
 
         for pending in pending_markets:
-            fills = self._simulate_order(
+            sim_fills = self._simulate_order(
                 snapshot,
                 pending.order,
                 reduce_only=pending.reduce_only,
             )
-            for delay_ms, fill_qty, fill_price, maker, slippage_bps in fills:
+            for delay_ms, fill_qty, fill_price, maker, slippage_bps in sim_fills:
                 asyncio.create_task(
                     self._finalise_fill(
                         order=pending.order,
@@ -737,6 +737,36 @@ class PaperBroker:
         ]
 
     async def _finalise_fill(
+        self,
+        *,
+        order: Order,
+        snapshot: MarketSnapshot,
+        fill_qty: float,
+        fill_price: float,
+        maker: bool,
+        slippage_bps: float,
+        delay_ms: float,
+        reduce_only: bool,
+    ) -> None:
+        try:
+            await self._finalise_fill_inner(
+                order=order,
+                snapshot=snapshot,
+                fill_qty=fill_qty,
+                fill_price=fill_price,
+                maker=maker,
+                slippage_bps=slippage_bps,
+                delay_ms=delay_ms,
+                reduce_only=reduce_only,
+            )
+        except Exception:
+            logger = logging.getLogger(__name__)
+            logger.exception(
+                "CRITICAL: _finalise_fill failed for %s %s qty=%.6f price=%.2f — position may be inconsistent",
+                order.symbol, order.side, fill_qty, fill_price,
+            )
+
+    async def _finalise_fill_inner(
         self,
         *,
         order: Order,

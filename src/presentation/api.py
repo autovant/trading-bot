@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 
 from src.application.backtest_engine import BacktestExecutionEngine
 from src.application.strategy_manager import StrategyManager
-from src.domain.entities import MarketData, Order as DomainOrder, OrderType as DomainOrderType, Side as DomainSide, OrderStatus as DomainOrderStatus
 from src.services.strategy_store import StrategyStore
 from src.strategies.dynamic_engine import DynamicStrategyEngine
 from src.strategies.ml_skeleton import MLStrategy
@@ -24,11 +23,15 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Trading Bot API")
 
+import os as _os
+
+_cors_origins = _os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8080").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -478,7 +481,7 @@ async def market_data_simulator():
             "data": {
                 "symbol": "BTC-PERP",
                 "price": price,
-                "timestamp": int(datetime.utcnow().timestamp() * 1000)
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
             }
         })
         

@@ -161,7 +161,7 @@ class TrendRegimePlugin(ScoringPlugin):
             reasons.append(f"Positive momentum (ROC={roc_val:.2%})")
         elif roc_val > 0:
             roc_score = 1
-            reasons.append(f"Slight positive momentum")
+            reasons.append("Slight positive momentum")
         elif roc_val < -0.02:
             roc_score = 0
             reasons.append(f"Negative momentum (ROC={roc_val:.2%})")

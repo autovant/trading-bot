@@ -9,7 +9,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -17,15 +17,34 @@ import pandas as pd
 from src.config import TradingBotConfig, get_config
 from src.database import DatabaseManager
 from src.dynamic_strategy import DynamicStrategyEngine, StrategyConfig
-from src.exchange import ExchangeClient
+from src.exchange import create_exchange_client
 from src.indicators import TechnicalIndicators
-from src.models import MarketSnapshot, Side
+from src.models import MarketRegime, MarketSnapshot, Side, TradingSetup, TradingSignal
 from src.paper_trader import PaperBroker
-from src.strategy import MarketRegime, TradingSetup, TradingSignal
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _json_safe(obj: Any) -> Any:
+    """Recursively convert numpy/pandas types to JSON-serializable Python types."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        v = float(obj)
+        if np.isnan(v) or np.isinf(v):
+            return 0.0
+        return v
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (pd.Timestamp, datetime)):
+        return str(obj)
+    return obj
 
 
 class VirtualClock:
@@ -41,7 +60,11 @@ class VirtualClock:
 
 class BacktestEngine:
     def __init__(
-        self, config: TradingBotConfig, strategy_config: Optional[StrategyConfig] = None
+        self,
+        config: TradingBotConfig,
+        strategy_config: Optional[StrategyConfig] = None,
+        strategy_name: Optional[str] = None,
+        strategy_params: Optional[Dict] = None,
     ):
         self.config = config
         self.strategy_config = strategy_config
@@ -51,6 +74,20 @@ class BacktestEngine:
         self.dynamic_engine: Optional[DynamicStrategyEngine] = None
         if self.strategy_config:
             self.dynamic_engine = DynamicStrategyEngine(self.strategy_config)
+
+        # Initialize preset strategy from registry if provided
+        self.preset_strategy: Any = None
+        if strategy_name:
+            try:
+                from src.strategies.registry import StrategyRegistry
+                self.preset_strategy = StrategyRegistry.instantiate(
+                    strategy_name,
+                    symbol="PLACEHOLDER",  # Will be set per-backtest
+                    params=strategy_params,
+                )
+                logger.info("Using preset strategy: %s", strategy_name)
+            except Exception as e:
+                logger.warning("Failed to load preset strategy %s: %s", strategy_name, e)
 
         self.initial_balance = config.backtesting.initial_balance
 
@@ -86,11 +123,15 @@ class BacktestEngine:
                 f"Starting backtest for {symbol} from {start_date} to {end_date}"
             )
 
+            # Set symbol on preset strategy if present
+            if self.preset_strategy and hasattr(self.preset_strategy, "symbol"):
+                self.preset_strategy.symbol = symbol
+
             # Initialize database
             await self.database.initialize()
 
             # Initialize exchange client for data fetching
-            exchange = ExchangeClient(
+            exchange = create_exchange_client(
                 self.config.exchange,
                 app_mode="paper",
                 paper_broker=self.broker,
@@ -131,7 +172,7 @@ class BacktestEngine:
             await self.database.close()
 
     async def _fetch_historical_data(
-        self, exchange: ExchangeClient, symbol: str, start_date: str, end_date: str
+        self, exchange: Any, symbol: str, start_date: str, end_date: str
     ) -> Dict[str, pd.DataFrame]:
         """Fetch historical data for all required timeframes."""
         data: Dict[str, pd.DataFrame] = {}
@@ -233,6 +274,8 @@ class BacktestEngine:
             f"{symbol_slug}_{timeframe_slug}",
             f"{symbol.upper()}_{timeframe}",
             f"{symbol}_{timeframe_slug}",
+            symbol.upper(),
+            symbol_slug,
         ]
         search_roots = [
             Path("data") / "historical",
@@ -250,6 +293,7 @@ class BacktestEngine:
             dataset = self._read_local_dataset(path, symbol)
             if dataset is not None and not dataset.empty:
                 logger.info("Loaded %s bars from %s", len(dataset), path)
+                dataset = self._resample_if_needed(dataset, timeframe)
                 return dataset
 
         logger.warning(
@@ -283,6 +327,21 @@ class BacktestEngine:
             df = df[df["symbol"].str.upper() == symbol.upper()]
 
         return df if not df.empty else None
+
+    _RESAMPLE_MAP = {"4h": "4h", "1d": "1D", "1day": "1D", "1daily": "1D"}
+
+    def _resample_if_needed(
+        self, df: pd.DataFrame, timeframe: str
+    ) -> pd.DataFrame:
+        """Resample hourly data to a coarser timeframe if required."""
+        rule = self._RESAMPLE_MAP.get(timeframe.lower())
+        if rule is None:
+            return df
+        ohlcv = df.resample(rule).agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+        ).dropna(subset=["open"])
+        logger.info("Resampled %s bars → %s bars (%s)", len(df), len(ohlcv), timeframe)
+        return ohlcv
 
     async def _simulate_trading(
         self, symbol: str, data: Dict[str, pd.DataFrame], start_date_str: str
@@ -361,8 +420,11 @@ class BacktestEngine:
                     # Allow broker to process fills
                     await asyncio.sleep(0)
 
-                # Analyze market and generate signals (at Close)
-                await self._analyze_market(symbol, current_data, current_time)
+                # Generate and execute signals
+                if self.preset_strategy:
+                    await self._run_preset_strategy(symbol, row, current_time)
+                else:
+                    await self._analyze_market(symbol, current_data, current_time)
 
                 # Allow broker to process any new orders
                 await asyncio.sleep(0)
@@ -383,6 +445,40 @@ class BacktestEngine:
             import traceback
 
             traceback.print_exc()
+
+    async def _run_preset_strategy(self, symbol: str, row: pd.Series, current_time: datetime):
+        """Delegate signal generation to a preset IStrategy instance."""
+        from src.domain.entities import MarketData as DomainMarketData
+
+        try:
+            market_data = DomainMarketData(
+                symbol=symbol,
+                timestamp=current_time,
+                open=float(row.get("open", row["close"])),
+                high=float(row.get("high", row["close"])),
+                low=float(row.get("low", row["close"])),
+                close=float(row["close"]),
+                volume=float(row.get("volume", 0)),
+            )
+            orders = await self.preset_strategy.on_tick(market_data)
+            if orders:
+                for order in orders:
+                    side_str = order.side.value if hasattr(order.side, "value") else str(order.side)
+                    order_type = order.order_type.value if hasattr(order.order_type, "value") else str(order.order_type)
+                    # Scale quantity based on account balance and price
+                    balance = (await self.broker.get_account_balance())["totalWalletBalance"]
+                    risk_amount = balance * self.config.trading.risk_per_trade
+                    quantity = risk_amount / max(float(row["close"]), 1.0)
+                    await self.broker.place_order(
+                        symbol=symbol,
+                        side=side_str,
+                        order_type=order_type,
+                        quantity=quantity,
+                        price=order.price,
+                        client_id=order.id,
+                    )
+        except Exception as e:
+            logger.error("Preset strategy error: %s", e)
 
     async def _analyze_market(
         self, symbol: str, data: Dict[str, pd.DataFrame], current_time: datetime
@@ -732,7 +828,7 @@ class BacktestEngine:
         # Record equity point
         self.equity_curve.append(
             {
-                "timestamp": timestamp,
+                "timestamp": str(timestamp),
                 "balance": balance,
                 "equity": total_equity,
                 "drawdown": current_drawdown,
@@ -749,9 +845,10 @@ class BacktestEngine:
         trades = []
         for t in trades_models:
             trade_dict = t.model_dump()
-            # Ensure timestamps are strings
-            if isinstance(trade_dict.get("timestamp"), datetime):
-                trade_dict["timestamp"] = trade_dict["timestamp"].isoformat()
+            # Ensure all datetime-like values are strings
+            for key, val in trade_dict.items():
+                if isinstance(val, (datetime, pd.Timestamp)):
+                    trade_dict[key] = str(val)
 
             # Calculate net_pnl
             trade_dict["net_pnl"] = (
@@ -816,7 +913,7 @@ class BacktestEngine:
         else:
             sharpe_ratio = 0.0
 
-        return {
+        return _json_safe({
             "total_trades": self.total_trades,
             "winning_trades": self.winning_trades,
             "losing_trades": self.losing_trades,
@@ -832,7 +929,20 @@ class BacktestEngine:
             * 100,
             "trades": trades,
             "equity_curve": self.equity_curve,
-        }
+        })
+
+
+async def run_backtest(
+    symbol: str,
+    start: str,
+    end: str,
+    strategy_name: Optional[str] = None,
+    strategy_params: Optional[Dict] = None,
+) -> Dict:
+    """Module-level convenience function for running backtests."""
+    config = get_config()
+    engine = BacktestEngine(config, strategy_name=strategy_name, strategy_params=strategy_params)
+    return await engine.run_backtest(symbol, start, end)
 
 
 async def main():

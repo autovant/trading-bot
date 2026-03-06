@@ -337,7 +337,7 @@ class TechnicalIndicators:
             # Calculate volume at each price level
             volume_at_price = np.zeros(bins)
 
-            for i, row in data.iterrows():
+            for _, row in data.iterrows():
                 # Distribute volume across the price range of the bar
                 high_price = row["high"]
                 low_price = row["low"]
