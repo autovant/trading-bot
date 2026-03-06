@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Fixed
+- Hardcoded `"mode": "live"` in config reload publisher now reads from `config.app_mode`
+- Silent mock order response on exchange errors replaced with proper HTTP 500
+- Silent `except: pass` blocks in vault, agents, and messaging routes now log warnings
+- Duplicate `MockMessagingClient` in API main removed; uses canonical version from `src/messaging.py`
+- Redis Pub/Sub stub removed from signal engine (non-functional dead code)
+
+### Added
+- `POST /api/auth/rotate-key` endpoint with 24-hour grace period for old key
+- Auth middleware now supports key rotation state (old + new key valid during grace)
+
+## [1.0.0] — 2026-03-05
+
 ### Added
 - **Configurable run modes (`APP_MODE`)** with fail-closed Pydantic validation; all services honour `live | paper | replay` and expose the `trading_mode{service,mode}` Prometheus label.
 - **High-fidelity PaperBroker** delivering latency/slippage modelling, maker rebates, taker fees, funding accrual, liquidation guardrails, and partial fills with queue simulation. All orders/trades/positions/PnL rows are tagged with `{mode, run_id}`.

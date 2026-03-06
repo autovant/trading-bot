@@ -1,19 +1,21 @@
 # Crypto Trading Bot
 
-A production-ready cryptocurrency trading bot with advanced strategy implementation, real-time monitoring, and backtesting capabilities.
+A production-ready cryptocurrency trading platform with an advanced strategy engine, AI agent orchestration, real-time React UI, and comprehensive backtesting.
 
 ## Features
 
-- **Advanced Trading Strategy**: Regime detection, confidence scoring, ladder entries, dual stops
-- **Risk Management**: Position sizing based on $1000 initial capital with 0.6% risk per trade
-- **Real-time Dashboard**: Streamlit-based monitoring interface
-- **Backtesting Engine**: Historical performance analysis with realistic execution
-- **Database Persistence**: SQLite storage for trades, positions, and PnL tracking
-- **Docker Support**: Containerized deployment with docker-compose
-- **FastAPI Microservices**: Python-based execution, feed, risk, replay, reporter, and ops API services connected via NATS
-- **Real-time Communication**: Publish-subscribe messaging for market data and trading signals
-- **Alert System**: Webhook-based alerts for critical events (e.g., Slack, Discord)
-- **Websocket Integration**: Direct exchange websocket connection for low-latency order updates (Bybit/Zoomex)
+- **Advanced Trading Strategy**: Multi-timeframe regime detection, confidence scoring, ladder entries, dual stops
+- **AI Agent Framework**: Autonomous agents with OODA decision loop, lifecycle management (CREATE → BACKTEST → PAPER → LIVE → RETIRE)
+- **Risk Management**: Portfolio-level risk, per-agent controls, crisis mode, kill switch, correlation limits
+- **React Trading Workstation**: Institutional-grade UI with market view, strategy builder, backtest playback, agent management, order book, signals panel, trade journal
+- **Credential Vault**: AES-256-GCM encrypted at rest, secure API key management
+- **FastAPI Microservices**: Execution, feed, risk, reporter, replay, signal engine, LLM proxy, agent orchestrator — all connected via NATS
+- **Backtesting Engine**: Walk-forward optimization, Monte Carlo simulation, strategy comparison
+- **Signal Processing**: TradingView webhook ingestion, signal scoring, auto-execution
+- **Real-time Communication**: NATS pub/sub + WebSocket bridge for live UI updates
+- **Docker Orchestration**: 13+ services via docker-compose, with VPS deployment option
+- **Monitoring**: Prometheus + Grafana dashboards, Discord alert escalation
+- **Database**: PostgreSQL (TimescaleDB) with SQLite fallback for dev/testing
 
 ## Quickstart
 
@@ -32,9 +34,12 @@ A production-ready cryptocurrency trading bot with advanced strategy implementat
    - Risk: `http://localhost:8084/health`
    - Replay: `http://localhost:8085/health`
 
-2. **Open the dashboard**
+2. **Open the Dashboard**
 
-   Visit `http://localhost:8501` — the header badge should display `MODE: PAPER`. Use the Paper Config panel to tune latency, slippage, fees, partial-fill behaviour, and margin guardrails (max_leverage, initial_margin_pct, maintenance_margin_pct); changes are applied via the ops-api.
+   **React Trading Workstation (Recommended)**:
+   Navigate to the `trading-bot-ai-studio/` directory (sibling folder), run `npm install` and `npm run dev`. Visit `http://localhost:5173`.
+   
+   Or use Docker Compose which serves the frontend via nginx at `http://localhost:8080`.
 
 3. **Backtest and replay the strategy**
 
@@ -182,23 +187,36 @@ pytest tests/test_zoomex_client.py
 
 ## Architecture
 
-- `src/main.py` - Main trading engine with hot-reload
-- `src/strategy.py` - Complete trading strategy implementation
-- `src/exchange.py` - Exchange API integration (Bybit/Zoomex)
-- `src/database.py` - SQLite persistence layer
-- `src/indicators.py` - Technical analysis indicators
-- `src/messaging.py` - NATS messaging system
-- `src/services/` - FastAPI microservices (execution, feed, risk, reporter, replay)
-- `dashboard/app.py` - Streamlit monitoring interface
-- `tools/backtest.py` - Historical backtesting engine
+The system is a **unified trading platform** combining a Python microservices backend with a React/Vite institutional-grade frontend.
+
+- `src/main.py` — Main trading engine with hot-reload
+- `src/strategy.py` — Complete trading strategy implementation
+- `src/exchange.py` — Exchange API integration (Bybit/Zoomex via CCXT)
+- `src/database.py` — PostgreSQL (TimescaleDB) + SQLite persistence
+- `src/indicators.py` — Technical analysis indicators
+- `src/messaging.py` — NATS messaging system
+- `src/api/` — FastAPI unified API server (port 8000) with REST + WebSocket
+- `src/api/routes/` — REST endpoints: agents, backtest, market, risk, signals, strategy, vault, system, data, presets
+- `src/api/ws.py` — WebSocket manager with NATS bridge for real-time UI updates
+- `src/services/` — FastAPI microservices (execution, feed, risk, reporter, replay, signal engine, LLM proxy, agent orchestrator)
+- `src/security/` — AES-256-GCM credential vault, mode guard
+- `src/risk/` — Portfolio-level risk manager, per-agent controls
+- `src/backtest/` — Walk-forward optimizer, Monte Carlo simulation
+- `src/notifications/` — Discord webhooks, alert escalation
+- `trading-bot-ai-studio/` — React 19 + Vite 6 + Tailwind v4 frontend (served via nginx)
+- `tools/backtest.py` — Historical backtesting engine
+
+See [SERVICES.md](SERVICES.md) for the full service registry and ports.
 
 ## Production Readiness
 
 - Quick check: `python tools/production_readiness_check.py --mode paper --strict`
 - Test suite: `python -m pytest tests/test_production_readiness.py -q`
-- Quick reference: `PRODUCTION_READINESS_QUICK_REF.md`
-- Full guide: `tools/README_PRODUCTION_READINESS.md`
-- Latest status snapshot: `docs/CODEBASE_STATUS_2026-03-02.md`
+- Service status: [STATUS.md](STATUS.md)
+- Service registry: [SERVICES.md](SERVICES.md)
+- Architecture: [docs/UNIFIED_ARCHITECTURE.md](docs/UNIFIED_ARCHITECTURE.md)
+- Implementation plan: [plans/unified-platform-plan.md](plans/unified-platform-plan.md)
+- Deployment guide: [DEPLOYMENT.md](DEPLOYMENT.md)
 
 ## License
 

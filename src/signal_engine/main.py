@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -20,17 +21,17 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
+from src.database import DatabaseManager, Signal
 from src.signal_engine.alert_router import AlertRouter
-from src.signal_engine.config import ConfigManager, get_default_strategy
+from src.signal_engine.config import ConfigManager
 from src.signal_engine.market_data import MarketDataService, SubscriptionManager
 from src.signal_engine.schemas import (
     AlertPayload,
     SignalOutput,
-    SignalRecord,
     StrategyProfile,
     SubscriptionConfig,
 )
-from src.signal_engine.signal_engine import SignalEngine, SignalProcessor
+from src.signal_engine.signal_engine import SignalProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,7 @@ class SignalEngineState:
         self.subscription_manager: Optional[SubscriptionManager] = None
         self.signal_processor: Optional[SignalProcessor] = None
         self.alert_router: Optional[AlertRouter] = None
+        self.database: Optional[DatabaseManager] = None
         
         # Store recent signals for API retrieval
         self.recent_signals: Dict[tuple, SignalOutput] = {}
@@ -171,6 +173,10 @@ async def on_candle_update(
         if len(state.signal_history) > state.max_history:
             state.signal_history = state.signal_history[-state.max_history:]
         
+        # Persist to database (fire-and-forget)
+        if state.database:
+            asyncio.create_task(_persist_signal(signal))
+        
         # Route alert
         await state.alert_router.route(signal)
         
@@ -178,6 +184,30 @@ async def on_candle_update(
             f"Signal emitted: {signal.side.value} {signal.symbol} "
             f"score={signal.score}"
         )
+
+
+async def _persist_signal(signal: SignalOutput) -> None:
+    """Persist a signal to the database. Fire-and-forget — errors are logged, not raised."""
+    try:
+        db_signal = Signal(
+            source="signal_engine",
+            symbol=signal.symbol,
+            side=signal.side.value,
+            confidence=signal.score,
+            entry_price=signal.candle.get("close"),
+            status="generated",
+            raw_payload={
+                "exchange": signal.exchange,
+                "timeframe": signal.timeframe,
+                "score": signal.score,
+                "strength": signal.strength.value,
+                "reasons": signal.reasons,
+                "idempotency_key": signal.idempotency_key,
+            },
+        )
+        await state.database.create_signal(db_signal)
+    except Exception:
+        logger.exception("Failed to persist signal to database")
 
 
 @asynccontextmanager
@@ -198,9 +228,17 @@ async def lifespan(app: FastAPI):
     state.alert_router = AlertRouter(
         websocket_enabled=alerts_config.websocket_enabled,
         webhooks=alerts_config.webhooks,
-        redis_url=alerts_config.redis_url if alerts_config.redis_enabled else None,
-        redis_channel=alerts_config.redis_channel,
     )
+    
+    # Initialize database for signal persistence
+    db_url = os.environ.get("DATABASE_URL", "sqlite:///data/trades.db")
+    try:
+        state.database = DatabaseManager(db_url)
+        await state.database.initialize()
+        logger.info("Database initialized for signal persistence")
+    except Exception:
+        logger.exception("Failed to initialize database — signals will not be persisted")
+        state.database = None
     
     # Load subscriptions from config
     for sub in state.config_manager.subscriptions:
@@ -225,6 +263,9 @@ async def lifespan(app: FastAPI):
     
     if state.alert_router:
         await state.alert_router.close()
+    
+    if state.database:
+        await state.database.close()
     
     logger.info("Confluence Signal Engine stopped")
 
@@ -478,7 +519,7 @@ async def websocket_stream(
     await websocket.accept()
     
     if state.alert_router:
-        state.alert_router.add_websocket(websocket, exchange, symbol, tf)
+        await state.alert_router.add_websocket(websocket, exchange, symbol, tf)
     
     try:
         # Send welcome message
@@ -508,7 +549,7 @@ async def websocket_stream(
         pass
     finally:
         if state.alert_router:
-            state.alert_router.remove_websocket(websocket)
+            await state.alert_router.remove_websocket(websocket)
 
 
 # =============================================================================

@@ -55,7 +55,7 @@ class MemoryMessagingClient:
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
-            pass
+            logger.debug("No running event loop during MemoryMessagingClient.connect()")
         logger.info("Connected to In-Memory Messaging Bus")
 
     async def close(self):
@@ -244,7 +244,8 @@ class MessagingClient:
 
         try:
             await self.connect()
-        except Exception:
+        except Exception as exc:
+            logger.error("Failed to restore NATS connection: %s", exc)
             return False
 
         return self.connected and self._is_nc_connected()

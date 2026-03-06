@@ -1,6 +1,12 @@
 
-from typing import Dict
-from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
 
 # Metrics required by PaperBroker (Standardizing naming)
 AVERAGE_SLIPPAGE_BPS = Gauge(
@@ -22,6 +28,16 @@ TRADING_MODE = Gauge(
     'trading_mode_status',
     'Active trading mode status (1=active)',
     ['service', 'mode']
+)
+CIRCUIT_BREAKERS = Counter(
+    'risk_circuit_breaker_trips_total',
+    'Number of circuit breaker trips',
+    ['mode']
+)
+REJECT_RATE = Gauge(
+    'execution_reject_rate',
+    'Current order rejection rate',
+    ['mode']
 )
 
 

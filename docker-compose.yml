@@ -1,18 +1,21 @@
-version: '3.8'
-
 services:
   postgres:
     image: timescale/timescaledb-ha:pg14-latest
     container_name: postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: tradingbot
-      POSTGRES_PASSWORD: tradingbot
-      POSTGRES_DB: tradingbot
+      POSTGRES_USER: ${POSTGRES_USER:-tradingbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-tradingbot}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tradingbot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   nats:
     image: nats:latest
@@ -36,6 +39,8 @@ services:
       EXCHANGE_API_KEY: ${EXCHANGE_API_KEY}
       EXCHANGE_SECRET_KEY: ${EXCHANGE_SECRET_KEY}
       ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL}
+      NATS_URL: nats://nats:4222
+      DATABASE_URL: postgresql://${POSTGRES_USER:-tradingbot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tradingbot}
     read_only: true
     tmpfs:
       - /tmp
@@ -45,8 +50,10 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
     depends_on:
-      - nats
-      - postgres
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
 
   execution:
     build:
@@ -57,12 +64,22 @@ services:
     environment:
       APP_MODE: ${APP_MODE:-paper}
       PYTHONPATH: /app
+      NATS_URL: nats://nats:4222
+      DATABASE_URL: postgresql://${POSTGRES_USER:-tradingbot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tradingbot}
     command: [ "python3", "-m", "uvicorn", "src.services.execution:app", "--host", "0.0.0.0", "--port", "8080" ]
     depends_on:
-      - nats
-      - postgres
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     read_only: true
     tmpfs:
       - /tmp
@@ -80,11 +97,19 @@ services:
     environment:
       APP_MODE: ${APP_MODE:-paper}
       PYTHONPATH: /app
+      NATS_URL: nats://nats:4222
     command: [ "python3", "-m", "uvicorn", "src.services.feed:app", "--host", "0.0.0.0", "--port", "8081" ]
     depends_on:
-      - nats
+      nats:
+        condition: service_started
     ports:
       - "8081:8081"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     read_only: true
     tmpfs:
       - /tmp
@@ -101,16 +126,28 @@ services:
     environment:
       APP_MODE: ${APP_MODE:-paper}
       PYTHONPATH: /app
-      API_KEY: ${API_KEY:-secret-key}
-      POSTGRES_USER: tradingbot
-      POSTGRES_PASSWORD: tradingbot
-      POSTGRES_DB: tradingbot
+      API_KEY: ${API_KEY:?API_KEY must be set}
+      VAULT_MASTER_KEY: ${VAULT_MASTER_KEY:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:8080}
+      POSTGRES_USER: ${POSTGRES_USER:-tradingbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-tradingbot}
+      NATS_URL: nats://nats:4222
+      DATABASE_URL: postgresql://${POSTGRES_USER:-tradingbot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tradingbot}
     command: [ "python3", "-m", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000" ]
     ports:
       - "8000:8000"
     depends_on:
-      - nats
-      - postgres
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     read_only: false
     tmpfs:
       - /tmp
@@ -118,26 +155,26 @@ services:
       - ./config:/app/config
       - ./data:/app/data
       - ./src:/app/src:ro
+      - ./tools:/app/tools:ro
+      - ./sample_data:/app/sample_data:ro
 
-  dash:
+  frontend:
     build:
-      context: .
+      context: ../trading-bot-ai-studio
       dockerfile: Dockerfile
-    container_name: dash
+    container_name: frontend
     restart: unless-stopped
-    environment:
-      APP_MODE: ${APP_MODE:-paper}
-      PYTHONPATH: /app
     ports:
-      - "8501:8501"
-    read_only: true
-    tmpfs:
-      - /tmp
-    command: [ "python3", "-m", "streamlit", "run", "dashboard/app.py" ]
+      - "3080:80"
     depends_on:
-      - strategy-engine
-    volumes:
-      - ./dashboard:/app/dashboard:ro
+      api-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:80/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   reporter:
     build:
@@ -148,11 +185,20 @@ services:
     environment:
       APP_MODE: ${APP_MODE:-paper}
       PYTHONPATH: /app
+      NATS_URL: nats://nats:4222
+      DATABASE_URL: postgresql://${POSTGRES_USER:-tradingbot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tradingbot}
     command: [ "python3", "-m", "uvicorn", "src.services.reporter:app", "--host", "0.0.0.0", "--port", "8083" ]
     depends_on:
-      - nats
+      nats:
+        condition: service_started
     ports:
       - "8083:8083"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8083/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     read_only: true
     tmpfs:
       - /tmp
@@ -171,11 +217,20 @@ services:
       APP_MODE: ${APP_MODE:-paper}
       PYTHONPATH: /app
       ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL}
+      NATS_URL: nats://nats:4222
+      DATABASE_URL: postgresql://${POSTGRES_USER:-tradingbot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tradingbot}
     command: [ "python3", "-m", "uvicorn", "src.services.risk:app", "--host", "0.0.0.0", "--port", "8084" ]
     depends_on:
-      - nats
+      nats:
+        condition: service_started
     ports:
       - "8084:8084"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8084/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     read_only: true
     tmpfs:
       - /tmp
@@ -192,9 +247,11 @@ services:
     environment:
       APP_MODE: ${APP_MODE:-replay}
       PYTHONPATH: /app
+      NATS_URL: nats://nats:4222
     command: [ "python3", "-m", "uvicorn", "src.services.replay:app", "--host", "0.0.0.0", "--port", "8085" ]
     depends_on:
-      - nats
+      nats:
+        condition: service_started
     read_only: true
     tmpfs:
       - /tmp
@@ -204,6 +261,12 @@ services:
       - ./config:/app/config:ro
     ports:
       - "8085:8085"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8085/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   signal-engine:
     build:
@@ -216,11 +279,92 @@ services:
       PYTHONPATH: /app
       ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      NATS_URL: nats://nats:4222
     command: [ "python3", "-m", "uvicorn", "src.signal_engine.main:app", "--host", "0.0.0.0", "--port", "8086" ]
     depends_on:
-      - nats
+      nats:
+        condition: service_started
     ports:
       - "8086:8086"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8086/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./src:/app/src:ro
+      - ./config:/app/config:ro
+
+  agent-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agent-orchestrator
+    restart: unless-stopped
+    environment:
+      APP_MODE: ${APP_MODE:-paper}
+      PYTHONPATH: /app
+      LLM_PROXY_URL: http://copilot-proxy:8087
+      NATS_URL: nats://nats:4222
+      DATABASE_URL: postgresql://${POSTGRES_USER:-tradingbot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tradingbot}
+      API_SERVER_URL: http://api-server:8000
+      API_KEY: ${API_KEY:-}
+    command: [ "python3", "-m", "uvicorn", "src.services.agent_orchestrator:app", "--host", "0.0.0.0", "--port", "8088" ]
+    depends_on:
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      copilot-proxy:
+        condition: service_healthy
+      api-server:
+        condition: service_healthy
+    ports:
+      - "8088:8088"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8088/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./src:/app/src:ro
+      - ./config:/app/config:ro
+      - ./data:/app/data
+
+  copilot-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: copilot-proxy
+    restart: unless-stopped
+    command: [ "python3", "-m", "uvicorn", "src.services.llm_proxy:app", "--host", "0.0.0.0", "--port", "8087" ]
+    environment:
+      PYTHONPATH: /app
+      LLM_PROVIDER: ${LLM_PROVIDER:-github-copilot}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      LLM_PROVIDER_URL: ${LLM_PROVIDER_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+      LLM_MODEL: ${LLM_MODEL:-gemini-2.0-flash}
+      LLM_RATE_LIMIT_RPM: ${LLM_RATE_LIMIT_RPM:-30}
+      LLM_CACHE_TTL_SECONDS: ${LLM_CACHE_TTL_SECONDS:-300}
+      VAULT_MASTER_KEY: ${VAULT_MASTER_KEY:-}
+      COPILOT_GITHUB_TOKEN: ${COPILOT_GITHUB_TOKEN:-}
+    ports:
+      - "8087:8087"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8087/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     read_only: true
     tmpfs:
       - /tmp
@@ -243,6 +387,37 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+
+  db-backup:
+    image: postgres:15-alpine
+    container_name: db-backup
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-tradingbot}
+      PGDATABASE: ${POSTGRES_DB:-tradingbot}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      BACKUP_DIR: /backups
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:-}
+      DAILY_RETENTION: "7"
+      WEEKLY_RETENTION: "4"
+    volumes:
+      - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
+      - backup_data:/backups
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        apk add --no-cache age bash &&
+        echo "0 2 * * * /usr/local/bin/backup.sh >> /var/log/backup.log 2>&1" | crontab - &&
+        crond -f -l 2
 
 volumes:
   postgres_data:
+  backup_data:

@@ -8,6 +8,7 @@ and shadow testing workflows.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,6 +21,8 @@ from nats.aio.subscription import Subscription
 from ..config import TradingBotConfig, load_config
 from ..messaging import MessagingClient
 from .base import BaseService, create_app
+
+logger = logging.getLogger(__name__)
 
 
 class ReplayService(BaseService):
@@ -44,9 +47,21 @@ class ReplayService(BaseService):
         self.messaging = MessagingClient({"servers": self.config.messaging.servers})
         await self.messaging.connect()
 
-        self._dataset = self._load_dataset()
+        try:
+            self._dataset = self._load_dataset()
+        except FileNotFoundError:
+            logger.warning("Replay dataset file not found — service will idle until data is available")
+            self._dataset = []
         if not self._dataset:
-            raise RuntimeError("Replay dataset is empty; check configuration")
+            logger.warning("Replay dataset is empty; service idle — upload data via API or place files in sample_data/")
+            # Register control sub so data can be loaded later, but don't start loop
+            control_subject = self.config.messaging.subjects.get(
+                "replay_control", "replay.control"
+            )
+            self._control_sub = await self.messaging.subscribe(
+                control_subject, self._handle_control
+            )
+            return
 
         self._interval = self._derive_interval()
         self._running.set()
@@ -120,9 +135,10 @@ class ReplayService(BaseService):
 
         source = config.replay.source
         scheme, path = self._parse_source(source)
-        dataset: List[Dict[str, float | str]] = []
 
-        if scheme == "parquet":
+        if path.is_dir():
+            df = self._load_directory(path, scheme)
+        elif scheme == "parquet":
             df = pd.read_parquet(path)
         elif scheme == "csv":
             df = pd.read_csv(path)
@@ -133,11 +149,16 @@ class ReplayService(BaseService):
                 else pd.read_csv(path)
             )
 
+        if df.empty:
+            return []
+
         if "timestamp" not in df.columns:
             raise ValueError("Replay dataset must include a 'timestamp' column")
 
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         df = df.sort_values("timestamp")
 
+        dataset: List[Dict[str, float | str]] = []
         for _, row in df.iterrows():
             ts = self._coerce_timestamp(row["timestamp"])
             symbol = row.get("symbol", config.trading.symbols[0])
@@ -152,6 +173,28 @@ class ReplayService(BaseService):
             dataset.append(snapshot)
 
         return dataset
+
+    @staticmethod
+    def _load_directory(path: Path, scheme: str) -> pd.DataFrame:
+        """Load and concatenate all data files from a directory."""
+        frames: List[pd.DataFrame] = []
+        extensions = {"parquet": [".parquet"], "csv": [".csv"]}.get(
+            scheme, [".parquet", ".csv"]
+        )
+        for ext in extensions:
+            for fp in sorted(path.glob(f"*{ext}")):
+                try:
+                    df = pd.read_parquet(fp) if ext == ".parquet" else pd.read_csv(fp)
+                    # Infer symbol from filename if column missing
+                    if "symbol" not in df.columns:
+                        df["symbol"] = fp.stem
+                    frames.append(df)
+                    logger.info("Loaded %d rows from %s", len(df), fp.name)
+                except Exception as e:
+                    logger.warning("Failed to load %s: %s", fp, e)
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
 
     @staticmethod
     def _coerce_timestamp(value) -> datetime:
@@ -198,6 +241,12 @@ class ReplayService(BaseService):
             "bid_size": bid_size,
             "ask_size": ask_size,
             "last_price": close,
+            "price": close,
+            "open": open_price,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
             "last_side": side,
             "last_size": last_size,
             "funding_rate": 0.0,
@@ -265,5 +314,5 @@ async def replay_control(action: str = Body(..., embed=True)) -> Dict[str, Any]:
     try:
         await service.set_state(action)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return service.status_payload()

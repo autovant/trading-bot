@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from ..logging_config import CorrelationIdMiddleware, setup_logging
 from ..metrics import TRADING_MODE
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,9 @@ class BaseService(ABC):
 def create_app(service: BaseService) -> FastAPI:
     """Create a FastAPI application wired to the provided service."""
 
+    # Initialize structured JSON logging for this service
+    setup_logging(service.name)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await service.start()
@@ -86,6 +90,9 @@ def create_app(service: BaseService) -> FastAPI:
             await service.stop()
 
     app = FastAPI(title=f"{service.name.title()} Service", lifespan=lifespan)
+
+    # Add correlation ID middleware for request tracing
+    app.add_middleware(CorrelationIdMiddleware)
 
     @app.get("/health")
     async def health_endpoint():

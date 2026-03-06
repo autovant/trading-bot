@@ -77,14 +77,34 @@ class FeedService(BaseService):
 
         logger.info(f"Starting feed for symbols: {symbols}")
 
+        consecutive_failures = 0
+        max_failures = 5
+
         while True:
             try:
                 # Fetch data for all symbols concurrently
                 tasks = [self._fetch_and_publish(symbol, subject) for symbol in symbols]
-                await asyncio.gather(*tasks, return_exceptions=True)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                # Rate limit compliance (simple sleep for now)
-                await asyncio.sleep(1.0)
+                # Track failures
+                failed = sum(1 for r in results if isinstance(r, Exception))
+                if failed == len(results):
+                    consecutive_failures += 1
+                else:
+                    consecutive_failures = 0
+
+                if consecutive_failures >= max_failures:
+                    logger.warning(
+                        "Exchange unreachable after %d attempts — feed pausing. "
+                        "Replay service will provide market data.",
+                        consecutive_failures,
+                    )
+                    # Back off significantly — check every 60s if exchange recovers
+                    await asyncio.sleep(60.0)
+                    consecutive_failures = max_failures  # stay in backoff mode
+                else:
+                    # Rate limit compliance (simple sleep for now)
+                    await asyncio.sleep(1.0)
 
             except Exception as e:
                 logger.error(f"Error in feed loop: {e}")

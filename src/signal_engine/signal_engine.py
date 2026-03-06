@@ -10,23 +10,20 @@ Core signal generation logic with:
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Optional, Set
 
 import pandas as pd
 
-from src.signal_engine.scoring import ScoringEngine, ScoringResult
 from src.signal_engine.schemas import (
-    AlertPayload,
     CandleData,
     SignalOutput,
     SignalSide,
-    SignalStrength,
     StrategyProfile,
 )
+from src.signal_engine.scoring import ScoringEngine, ScoringResult
 
 logger = logging.getLogger(__name__)
 

@@ -1,18 +1,24 @@
-# Python build stage
-FROM python:3.11-slim as builder
+# Build stage — install deps into a venv
+FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
-# Install dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
-# App stage
-FROM gcr.io/distroless/python3-debian11:nonroot
+# Runtime stage
+FROM python:3.12-slim
+
+RUN groupadd -r app && useradd -r -g app -d /app -s /sbin/nologin app
 
 WORKDIR /app
 
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /opt/venv /opt/venv
 COPY . .
 
-ENV PYTHONPATH=/app
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONPATH=/app \
+    PYTHONDONTWRITEBYTECODE=1
+
+USER app

@@ -6,11 +6,13 @@ from src.api.routes.market import get_db, get_exchange
 
 @pytest.fixture
 def client(mock_db, mock_exchange):
+    _saved = dict(app.dependency_overrides)
     app.dependency_overrides[get_db] = lambda: mock_db
     app.dependency_overrides[get_exchange] = lambda: mock_exchange
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
+    app.dependency_overrides.update(_saved)
 
 def test_get_account_summary(client, mock_exchange):
     async def get_balance():

@@ -18,11 +18,11 @@ import yaml
 
 from src.signal_engine.schemas import (
     AlertConfig,
+    BucketWeights,
+    GateConfig,
     SignalEngineConfig,
     StrategyProfile,
     SubscriptionConfig,
-    BucketWeights,
-    GateConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -152,10 +152,6 @@ def load_signal_engine_config(
             alerts.websocket_enabled = alerts_data["websocket"].get("enabled", True)
         if "webhooks" in alerts_data:
             alerts.webhooks = alerts_data["webhooks"]
-        if "redis" in alerts_data:
-            alerts.redis_enabled = alerts_data["redis"].get("enabled", False)
-            alerts.redis_url = alerts_data["redis"].get("url")
-            alerts.redis_channel = alerts_data["redis"].get("channel", "signals")
     
     # Build final config
     max_concurrent = raw_config.get("max_concurrent_subscriptions", 10)

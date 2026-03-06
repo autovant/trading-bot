@@ -1,5 +1,5 @@
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 # Shared Enums/Types can go here or be imported if they are complex
@@ -9,6 +9,10 @@ class BacktestRequest(BaseModel):
     symbol: str
     start: str
     end: str
+    strategy_name: Optional[str] = None
+    strategy_params: Optional[Dict[str, Any]] = None
+    walk_forward_windows: Optional[int] = None  # Epic 3.1: number of WF windows
+    monte_carlo_runs: Optional[int] = None  # Epic 3.2: MC simulation count
 
 class BacktestJobResponse(BaseModel):
     job_id: str
@@ -112,6 +116,8 @@ class TradeResponse(BaseModel):
     run_id: str
     timestamp: Optional[str]
     is_shadow: bool
+    agent_name: Optional[str] = None
+    strategy_name: Optional[str] = None
 
 class ConfigResponse(BaseModel):
     version: Optional[str]

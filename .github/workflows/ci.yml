@@ -53,6 +53,28 @@ jobs:
           pip install -r requirements.txt
       - name: Run tests
         run: pytest
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4  # v4.6.2
+        with:
+          name: coverage-report
+          path: htmlcov/
+          retention-days: 14
+
+  migration-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Verify migrations are in sync with schema
+        run: python scripts/check_migrations.py
 
   build:
     runs-on: ubuntu-latest

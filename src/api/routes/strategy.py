@@ -1,8 +1,8 @@
-from typing import List, Dict, Any, Optional
+from typing import List
 
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, Depends, HTTPException
 
-from src.api.models import StrategyResponse, StrategyRequest
+from src.api.models import StrategyRequest, StrategyResponse
 from src.database import DatabaseManager, Strategy
 
 strategy_router = APIRouter()

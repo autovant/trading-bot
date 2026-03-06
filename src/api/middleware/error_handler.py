@@ -45,7 +45,16 @@ async def global_exception_handler(request: Request, exc: Exception):
 
     # Handle Validation Errors (Pydantic/FastAPI)
     if isinstance(exc, (RequestValidationError, ValidationError)):
-        details = exc.errors() if hasattr(exc, "errors") else str(exc)
+        if hasattr(exc, "errors"):
+            import json as _json
+            try:
+                raw_errors = exc.errors()
+                _json.dumps(raw_errors)  # test serializability
+                details = raw_errors
+            except (TypeError, ValueError):
+                details = [{"msg": err.get("msg", str(err)), "loc": err.get("loc", []), "type": err.get("type", "value_error")} for err in exc.errors()]
+        else:
+            details = str(exc)
         logger.warning(f"Validation Error: {details}")
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

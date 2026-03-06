@@ -5,8 +5,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.config import TradingBotConfig
 from src.database import DatabaseManager, Order, OrderIntent
-from src.exchange import IExchange
 from src.engine.order_intent_ledger import OrderIntentLedger
+from src.exchange import IExchange
 from src.messaging import MessagingClient
 from src.models import (
     ConfidenceScore,

@@ -3,24 +3,25 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
-
-
 
 from src.config import TradingBotConfig, get_config
 from src.container import Container
 from src.database import DatabaseManager
 from src.exchange import ExchangeClient
 from src.exchanges.bybit_ws import BybitWebsocketClient
+from src.exchanges.paper_perps import PaperPerpsExchange
 from src.logging_config import setup_logging
 from src.messaging import MessagingClient
-from src.exchanges.paper_perps import PaperPerpsExchange
 from src.paper_trader import PaperBroker
-from src.presets import get_preset_strategies
 from src.services.market_data import MarketDataPublisher
 from src.services.perps import PerpsService
+
+try:
+    import aiohttp
+except ImportError:  # pragma: no cover
+    aiohttp = None  # type: ignore[assignment]
 from src.security.mode_guard import validate_mode_config
 from src.state.run_id_store import resolve_run_id
 from src.strategy import TradingStrategy
@@ -211,6 +212,57 @@ class TradingEngine:
     def signal_handler(self, signum, frame):
         logger.info(f"Received signal {signum}, shutting down...")
         self.running = False
+
+    async def run(self) -> None:
+        """Main trading loop — runs until signalled to stop."""
+        self.running = True
+        logger.info("Trading engine started — entering main loop")
+        try:
+            while self.running:
+                try:
+                    # Hot-reload config on file change
+                    try:
+                        mtime = Path("config/strategy.yaml").stat().st_mtime
+                        if mtime > self._last_config_mtime:
+                            logger.info("Config file changed — reloading")
+                            self._last_config_mtime = mtime
+                    except OSError:
+                        pass
+
+                    # Run perps trading cycle
+                    if self.perps_service:
+                        await self.perps_service.run_cycle()
+
+                    await asyncio.sleep(1)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error("Error in trading loop: %s", e, exc_info=True)
+                    await asyncio.sleep(5)
+        finally:
+            await self._shutdown()
+
+    async def _shutdown(self) -> None:
+        """Gracefully shut down all services."""
+        logger.info("Shutting down trading engine...")
+        if self.perps_service:
+            try:
+                await self.perps_service.halt()
+            except Exception as e:
+                logger.error("Error shutting down perps service: %s", e)
+        if self.messaging:
+            try:
+                await self.messaging.close()
+            except Exception as e:
+                logger.error("Error closing messaging: %s", e)
+        if self.database:
+            try:
+                await self.database.close()
+            except Exception as e:
+                logger.error("Error closing database: %s", e)
+        if self.session and not self.session.closed:
+            await self.session.close()
+        logger.info("Trading engine shut down")
 
 
 async def main():

@@ -66,10 +66,6 @@ alerts:
     #   retry_count: 3
     #   timeout_seconds: 10
     
-  redis:
-    enabled: false
-    url: redis://localhost:6379
-    channel: signals
 
 # =============================================================================
 # Engine Settings

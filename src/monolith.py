@@ -21,7 +21,9 @@ os.environ["DB_URL"] = f"sqlite:///{db_path}"
 os.environ["NATS_URL"] = "memory://"
 # Ensure API Key is set
 if not os.getenv("API_KEY"):
-    os.environ["API_KEY"] = "secret-key"
+    logger.warning("API_KEY not set — generating a random key for this session")
+    import secrets
+    os.environ["API_KEY"] = secrets.token_urlsafe(32)
 
 logger.info("Starting Trading Bot Monolith (No-Docker Mode)...")
 logger.info(f"Database: {os.environ['DB_URL']}")

@@ -96,6 +96,7 @@ celerybeat.pid
 
 # Environments
 .env
+.copilot_token
 .venv
 env/
 venv/
@@ -129,6 +130,15 @@ cython_debug/
 
 # VSCode
 .vscode/
+
+# macOS
+.DS_Store
+
+# Playwright MCP artifacts
+.playwright-mcp/
+
+# Large binary data files
+*.parquet
 
 # data files
 data/

@@ -1,0 +1,22 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../trading-bot-ai-studio"
+		}
+	],
+	"settings": {
+		"chat.agent.maxRequests": 5000,
+		"chat.unifiedAgentsBar.enabled": true,
+		"chat.tools.terminal.autoReplyToPrompts": true,
+		"chat.mcp.assisted.nuget.enabled": true,
+		"chat.instructionsFilesLocations": {
+			"./Users/samadshareef/instructions": true
+		},
+		"chat.promptFilesLocations": {
+			"./Users/samadshareef/global": true
+		}
+	}
+}

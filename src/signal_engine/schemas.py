@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -349,9 +349,6 @@ class AlertConfig(BaseModel):
     
     websocket_enabled: bool = True
     webhooks: List[WebhookDestination] = Field(default_factory=list)
-    redis_enabled: bool = False
-    redis_url: Optional[str] = None
-    redis_channel: str = "signals"
 
 
 class SignalEngineConfig(BaseModel):

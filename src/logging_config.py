@@ -1,65 +1,88 @@
-import json
+"""Structured JSON logging configuration with correlation ID middleware."""
+
+from __future__ import annotations
+
 import logging
-import sys
-from datetime import datetime, timezone
-from typing import Optional
+import os
+import uuid
+from contextvars import ContextVar
+from typing import Optional, Union
+
+from fastapi import Request, Response
+from pythonjsonlogger.json import JsonFormatter
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from .config import TradingBotConfig
 
+# Context variable for request correlation ID
+correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="")
 
-class JSONFormatter(logging.Formatter):
+
+class _CorrelationJsonFormatter(JsonFormatter):
+    """JSON formatter that injects service name and correlation ID."""
+
+    def __init__(self, service_name: str, **kwargs):
+        super().__init__(**kwargs)
+        self._service_name = service_name
+
+    def add_fields(self, log_record, record, message_dict):
+        super().add_fields(log_record, record, message_dict)
+        log_record["service"] = self._service_name
+        log_record["level"] = record.levelname
+        req_id = correlation_id_var.get("")
+        if req_id:
+            log_record["request_id"] = req_id
+
+
+def setup_logging(
+    config_or_name: Union[Optional[TradingBotConfig], str] = None,
+    level: str = "INFO",
+) -> logging.Logger:
+    """Configure the root logger with JSON structured output.
+
+    Supports two call patterns:
+    - ``setup_logging(config)`` — legacy, uses ``TradingBotConfig`` object
+    - ``setup_logging("service-name", level="DEBUG")`` — new, explicit service name
+
+    Returns the configured root logger.
     """
-    Formatter that outputs JSON strings for structured logging.
-    """
+    if isinstance(config_or_name, str):
+        service_name = config_or_name
+    else:
+        service_name = "trading-bot"
 
-    def format(self, record: logging.LogRecord) -> str:
-        log_record = {
-            "timestamp": datetime.fromtimestamp(
-                record.created, tz=timezone.utc
-            ).isoformat(),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-            "module": record.module,
-            "line": record.lineno,
-        }
+    effective_level = os.getenv("LOG_LEVEL", level).upper()
 
-        if record.exc_info:
-            log_record["exception"] = self.formatException(record.exc_info)
-
-        return json.dumps(log_record)
-
-
-def setup_logging(config: Optional[TradingBotConfig] = None) -> None:
-    """
-    Setup logging configuration based on the provided config.
-    """
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-
-    # clear existing handlers
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
-
-    # Console Handler (Human readable)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    console_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+    formatter = _CorrelationJsonFormatter(
+        service_name=service_name,
+        fmt="%(timestamp)s %(level)s %(name)s %(message)s",
+        rename_fields={"asctime": "timestamp"},
+        datefmt="%Y-%m-%dT%H:%M:%S%z",
     )
-    console_handler.setFormatter(console_formatter)
-    root_logger.addHandler(console_handler)
 
-    # File Handler (JSON structured for analysis) - if configured or default
-    # simplified for now, just always file log to 'bot.log'
-    file_handler = logging.FileHandler("bot.json.log")
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(JSONFormatter())
-    root_logger.addHandler(file_handler)
+    root = logging.getLogger()
+    root.handlers.clear()
 
-    # Example of level adjustments based on config could go here
-    # if config and config.debug:
-    #     root_logger.setLevel(logging.DEBUG)
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    root.addHandler(handler)
+    root.setLevel(effective_level)
 
     logging.info("Logging initialized")
+    return root
+
+
+class CorrelationIdMiddleware(BaseHTTPMiddleware):
+    """FastAPI middleware that propagates or generates a correlation ID."""
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+        token = correlation_id_var.set(request_id)
+        try:
+            response = await call_next(request)
+            response.headers["X-Request-ID"] = request_id
+            return response
+        finally:
+            correlation_id_var.reset(token)
