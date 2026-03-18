@@ -1,141 +1,145 @@
 # Trading Bot AI Coding Conventions
 
-This document provides essential guidance for AI agents working on this trading bot codebase.
+This document provides essential guidance for AI agents working on this trading bot codebase. Rely on these instructions first; only grep or browse the codebase when specific details (e.g. a file path or symbol name) are not covered here.
 
-## Architecture Overview
+## Repository Summary
 
-The system is a **unified trading platform** combining a Python microservices backend (`trading-bot/`) with a React/Vite institutional-grade frontend (`trading-bot-ai-studio/`). The Python backend is the single source of truth for all trading state; the React frontend is the single UI.
+A **unified algorithmic trading platform**: Python microservices backend (FastAPI, strategy engine, risk, execution) + React/Vite institutional-grade frontend. Supports paper, testnet, and live trading modes. **Python ≥ 3.11** is required.
 
-### Workspace Structure
+## Workspace Layout
 
-| Folder | Role |
-|--------|------|
-| `trading-bot/` | **Primary repo.** All backend code (FastAPI API, strategy engine, microservices), database, config, docker-compose, tests. |
-| `trading-bot-ai-studio/` | **Frontend source only.** React/Vite app built into static files and served by nginx. Its `server/` (Express backend) is **retired** — all API calls route to `trading-bot/src/api/`. |
+| Path | Role |
+|------|------|
+| `src/` | All Python backend source code |
+| `src/api/` | FastAPI unified API server (port 8000) |
+| `src/api/routes/` | REST endpoint modules (agents, backtest, market, risk, signals, strategy, vault, …) |
+| `src/api/ws.py` | WebSocket manager with NATS bridge |
+| `src/services/` | FastAPI microservices: execution (8080), feed (8081), reporter (8083), risk (8084), replay (8085), signal_service (8086), llm_proxy (8087), agent_orchestrator (8088) |
+| `src/strategy.py` | Core trading logic: regime detection, confidence scoring, ladders, dual stops |
+| `src/security/` | Credential vault (AES-256-GCM at rest), mode guard |
+| `src/risk/` | Portfolio-level risk manager, correlation limits |
+| `src/backtest/` | Walk-forward optimizer, Monte Carlo simulation |
+| `src/notifications/` | Discord webhook, alert escalation (INFO→WARNING→CRITICAL→AUTO_SHUTDOWN) |
+| `config/strategy.yaml` | Main Pydantic-validated config (hot-reloadable) |
+| `tests/` | 60+ pytest unit/integration test files |
+| `tools/` | CLI utilities: `backtest.py`, `production_readiness_check.py` |
+| `scripts/` | Helper scripts, including `check_migrations.py` |
+| `trading-bot-ai-studio/` | React 19 + Vite 6 + Tailwind v4 frontend (built to static files) |
+| `docker-compose.yml` | Full-stack orchestration (13+ services) |
+| `alembic/` | Database migration scripts |
+| `pyproject.toml` | Ruff + pytest configuration |
+| `pytest.ini` | Pytest settings (asyncio_mode=auto, coverage ≥ 40%) |
+| `mypy.ini` | Mypy settings |
+| `.pre-commit-config.yaml` | Pre-commit hooks: ruff, ruff-format, mypy |
 
-### Backend (Python)
+**Key files**: `src/main.py` (strategy engine entry point), `src/config.py` (config loader), `src/exchange.py` (exchange connector), `src/database.py` (schema), `src/messaging.py` (NATS, falls back to MockMessagingClient), `src/api/main.py` (API server entry point), `src/security/credential_vault.py`, `src/risk/portfolio_risk.py`, `src/services/agent_orchestrator.py`.
 
-- **Strategy Engine (`src/main.py`)**: Orchestrates the trading strategy. Loads configuration (`src/config.py`), connects to exchanges (`src/exchange.py`), executes strategy logic (`src/strategy.py`), stores data (`src/database.py`), communicates via NATS (`src/messaging.py`).
+## Build & Validation — Exact Command Sequences
 
-- **FastAPI API Server (`src/api/`)**: Unified gateway (port 8000) with REST + WebSocket endpoints for all frontend communication:
-  - Routes: `agents`, `auth`, `backtest`, `data`, `intelligence`, `market`, `notifications`, `portfolio`, `presets`, `risk`, `signals`, `strategy`, `system`, `vault`
-  - Middleware: API key auth, CORS, rate limiting, error handling
-  - WebSocket: `/ws` for real-time updates (positions, fills, alarms, agents, market data)
-  - Prometheus metrics at `/metrics`
+Always run these commands from the **repository root** with an active virtual environment.
 
-- **FastAPI Microservices (`src/services/`)**:
-  - `execution.py` — Order execution, PaperBroker simulation, execution reports (port 8080)
-  - `feed.py` — Live ticker and order book data from exchanges via NATS (port 8081)
-  - `reporter.py` — Performance metrics aggregation and summary reports (port 8083)
-  - `risk.py` — Risk metrics, circuit breaker status, crisis mode (port 8084)
-  - `replay.py` — Historical data streaming from Parquet files for backtesting (port 8085)
-  - `signal_service.py` — TradingView webhook ingestion, signal scoring (port 8086 via `src/signal_engine/main.py`)
-  - `llm_proxy.py` — OpenAI-compatible LLM proxy to Copilot/Gemini (port 8087)
-  - `agent_orchestrator.py` — AI agent lifecycle management, OODA loop (port 8088)
-
-- **Security (`src/security/`)**: Credential vault (AES-256-GCM at rest), mode guard for live/paper switching.
-
-- **Risk (`src/risk/`)**: Portfolio-level risk manager, per-agent risk controls, correlation limits.
-
-- **Backtesting (`src/backtest/`)**: Walk-forward optimizer, Monte Carlo simulation.
-
-- **Notifications (`src/notifications/`)**: Discord webhook integration, alert escalation (INFO → WARNING → CRITICAL → AUTO_SHUTDOWN).
-
-### Frontend (TypeScript/React)
-
-- **Location**: `trading-bot-ai-studio/`
-- **Stack**: React 19 + Vite 6 + Tailwind v4
-- **Key tabs**: Market, Strategy Builder, Backtest, Signals, Agents, Presets, Journal, Portfolio, Data, Settings
-- **API communication**: All REST calls route to `/api/*` (nginx-proxied to FastAPI). WebSocket at `/ws`.
-- **Note**: The Express backend (`server/`) is retired. Do not add features there.
-
-## Key Files
-
-- `src/main.py`: Entry point of the Python strategy engine.
-- `src/strategy.py`: Core trading logic (regime detection, confidence scoring, ladders, dual stops).
-- `src/api/main.py`: FastAPI unified API server — mounts all routers, middleware, WebSocket.
-- `src/api/routes/`: REST endpoint modules (agents, backtest, market, risk, signals, strategy, vault, etc.).
-- `src/api/ws.py`: WebSocket manager with NATS bridge for real-time UI updates.
-- `src/services/`: Python FastAPI microservices for execution, feed, risk, reporting, replay, signals, LLM proxy, agent orchestrator.
-- `src/security/credential_vault.py`: AES-256-GCM credential encryption/decryption.
-- `src/risk/portfolio_risk.py`: Portfolio-level risk with correlation and concentration limits.
-- `src/services/agent_orchestrator.py`: AI agent lifecycle (CREATE → BACKTEST → PAPER → LIVE → RETIRE).
-- `config/strategy.yaml`: Main configuration file (Pydantic-validated, hot-reloadable).
-- `docker-compose.yml`: Full-stack orchestration (13+ services).
-- `docker-compose.vps.yml`: VPS override for latency-sensitive deployment.
-- `tools/backtest.py`: Historical backtesting engine.
-
-## Developer Workflow
-
-### Running the Bot
-
-1.  **Activate the virtual environment**:
-    ```bash
-    source venv/bin/activate
-    ```
-2.  **Run the main application**:
-    ```bash
-    python src/main.py
-    ```
-3.  **Run the React dashboard** (from `trading-bot-ai-studio/`):
-    ```bash
-    npm install && npm run dev
-    ```
-    Visit `http://localhost:5173`.
-
-### Testing
-
-- **Unit Tests**: `pytest tests/` (60+ test files covering strategy, risk, agents, vault, API, etc.)
-- **Integration Tests**: `test_integration.py`
-- **Frontend E2E**: `npm run test:e2e` (Playwright, from `trading-bot-ai-studio/`)
-- **Backtesting**:
-  ```bash
-  python tools/backtest.py --symbol BTCUSDT --start 2023-01-01 --end 2024-01-01
-  ```
-
-### Docker
-
-The application is fully containerized. To run all services:
+### 1. Bootstrap (one-time)
 
 ```bash
-APP_MODE=paper docker compose up --build
+python3 -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-This starts:
-- **Infrastructure**: PostgreSQL (TimescaleDB), NATS messaging
-- **Core Engine**: Strategy engine, Execution service (port 8080), Feed service (port 8081)
-- **API & Frontend**: FastAPI API server (port 8000), React frontend via nginx (port 8080)
-- **Risk & Reporting**: Risk state (port 8084), Reporter (port 8083)
-- **AI & Signals**: Signal engine (port 8086), Copilot LLM proxy (port 8087), Agent orchestrator (port 8088)
-- **Replay**: Replay service (port 8085)
-- **Monitoring**: Prometheus (port 9090), Grafana (port 3000)
-- **Operations**: DB backup (daily encrypted backups)
-
-### Required Environment Variables
+### 2. Lint (must pass before every commit)
 
 ```bash
-# Mandatory
-POSTGRES_PASSWORD=<secure-password>
-API_KEY=<api-key-for-fastapi-auth>
+python -m ruff check .            # style + import checks
+python -m black --check .         # formatting check (use `python -m black .` to auto-fix)
+```
 
-# Exchange (for live/testnet)
-EXCHANGE_API_KEY=<key>
+Auto-fix shorthand: `python -m ruff check --fix . && python -m black .`
+
+### 3. Type-check
+
+```bash
+mypy src
+```
+
+`mypy.ini` sets `ignore_missing_imports = True`; stubs for `requests`, `PyYAML`, and `pydantic` are included via pre-commit.
+
+### 4. Run tests
+
+```bash
+pytest tests/ -v
+```
+
+- **asyncio_mode = auto** — no need to mark async tests manually.
+- Coverage minimum is **40%** (enforced by `--cov-fail-under=40` in `pytest.ini`). HTML report is written to `htmlcov/`.
+- Slow / exchange tests are skipped by default; run with `-m "not testnet"` to be explicit.
+
+### 5. Database migration check
+
+```bash
+python scripts/check_migrations.py
+```
+
+Always run after modifying `src/database.py` or adding Alembic migrations. This is enforced by CI.
+
+### 6. Config validation
+
+```bash
+make validate-config
+```
+
+This runs a YAML syntax check across `config/strategy.yaml`, `docker-compose.yml`, and `prometheus.yml`.
+
+### 7. Full pre-commit check (mirrors CI)
+
+```bash
+python -m ruff check . && python -m black --check . && pytest tests/ -v && python scripts/check_migrations.py
+```
+
+## CI Workflows (`.github/workflows/`)
+
+| Workflow | File | Jobs |
+|----------|------|------|
+| CI | `ci.yml` | lint (`ruff`, `black`), typecheck (`mypy src`), test (`pytest`), migration-check, build (Docker), scan (Trivy) |
+| Production Readiness | `production-readiness.yml` | `python tools/production_readiness_check.py --mode paper --strict` |
+
+All jobs target **Python 3.11** and install from `requirements.txt`. PRs must pass all CI jobs before merging.
+
+## Running Locally
+
+```bash
+# Backend strategy engine
+source venv/bin/activate
+python src/main.py
+
+# Full stack (all services)
+APP_MODE=paper docker compose up --build
+
+# Frontend only (dev server at http://localhost:5173)
+cd trading-bot-ai-studio && npm install && npm run dev
+```
+
+## Required Environment Variables
+
+```bash
+POSTGRES_PASSWORD=<secure>        # mandatory
+API_KEY=<api-key>                 # mandatory (FastAPI auth)
+EXCHANGE_API_KEY=<key>            # for live/testnet
 EXCHANGE_SECRET_KEY=<secret>
-
-# Optional
-APP_MODE=paper|live|replay
-VAULT_MASTER_KEY=<32-byte-key-base64>
-ALERT_WEBHOOK_URL=<discord/slack-webhook>
+APP_MODE=paper|live|replay        # default: paper
+VAULT_MASTER_KEY=<32-byte-base64>
+ALERT_WEBHOOK_URL=<discord/slack>
 GEMINI_API_KEY=<for-ai-features>
 CORS_ORIGINS=http://localhost:3000,http://localhost:8080
 ```
 
 ## Conventions
 
-- **Configuration**: All configuration is managed through `config/strategy.yaml`. Do not hardcode values. The `src/config.py` module loads and validates via Pydantic.
-- **Database**: PostgreSQL (TimescaleDB) is the primary store. SQLite is used for local dev/testing. Schema is managed in `src/database.py`.
-- **Messaging**: NATS pub/sub for inter-service communication (`src/messaging.py`). Falls back to MockMessagingClient if NATS is unavailable.
-- **Code Style**: PEP 8 with type hints. Validate with `ruff`, `black`, `mypy`.
-- **Microservices**: Single-purpose FastAPI apps managed via `docker-compose.yml`. All expose `/health` endpoints.
+- **Config**: All values in `config/strategy.yaml`. Never hardcode. `src/config.py` loads via Pydantic.
+- **Database**: PostgreSQL/TimescaleDB in production; SQLite for local/testing. Schema in `src/database.py`. Migrations in `alembic/`.
+- **Messaging**: NATS pub/sub (`src/messaging.py`). Falls back to `MockMessagingClient` when NATS is unavailable.
+- **Code style**: PEP 8, type hints, `ruff` + `black` + `mypy`. Line length 88 (Black default).
+- **Microservices**: Single-purpose FastAPI apps, each exposes `/health`. Managed via `docker-compose.yml`.
 - **Credentials**: Never in code or config files. Use the credential vault (`/api/vault/credentials`) or environment variables.
-- **Frontend**: React components in `trading-bot-ai-studio/components/`. All data access is via REST (`/api/*`) and WebSocket (`/ws`). No localStorage persistence for trading state.
+- **Frontend**: Components in `trading-bot-ai-studio/src/`. All data access via REST (`/api/*`) and WebSocket (`/ws`). No localStorage for trading state. The Express `server/` directory is **retired** — do not add features there.
+- **Security**: Do not expose secrets in logs or API responses. Live-mode changes require the mode guard in `src/security/`.
