@@ -141,7 +141,7 @@ def run(config_path: Optional[str] = None) -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    def _shutdown(sig, frame):
+    def _shutdown(signal_num: int, stack_frame: object) -> None:
         loop.create_task(app.stop())
 
     signal.signal(signal.SIGINT, _shutdown)

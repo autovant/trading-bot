@@ -113,17 +113,31 @@ class TradeStore:
             return cursor.lastrowid or 0
 
     async def update_trade_status(
-        self, trade_id: int, status: TradeStatus, **kwargs: object
+        self,
+        trade_id: int,
+        status: TradeStatus,
+        *,
+        fill_price: Optional[float] = None,
+        fill_size: Optional[float] = None,
+        pnl: Optional[float] = None,
+        error: Optional[str] = None,
+        order_id: Optional[str] = None,
     ) -> None:
         """Update the status and optional fields of a trade."""
         if not self._db:
             return
         sets = ["status = ?", "updated_at = ?"]
         vals: list = [status.value, datetime.now(timezone.utc).isoformat()]
-        for col in ("fill_price", "fill_size", "pnl", "error", "order_id"):
-            if col in kwargs:
+        for col, val in [
+            ("fill_price", fill_price),
+            ("fill_size", fill_size),
+            ("pnl", pnl),
+            ("error", error),
+            ("order_id", order_id),
+        ]:
+            if val is not None:
                 sets.append(f"{col} = ?")
-                vals.append(kwargs[col])
+                vals.append(val)
         vals.append(trade_id)
         await self._db.execute(
             f"UPDATE copied_trades SET {', '.join(sets)} WHERE id = ?",

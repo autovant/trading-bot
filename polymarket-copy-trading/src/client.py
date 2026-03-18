@@ -39,7 +39,7 @@ class PolymarketClient:
     def __init__(self, config: PolymarketConfig) -> None:
         self._config = config
         self._session: Optional[aiohttp.ClientSession] = None
-        self._clob_client: Any = None
+        self._clob_client: Optional[Any] = None
 
     async def start(self) -> None:
         """Initialize HTTP session and CLOB client."""
