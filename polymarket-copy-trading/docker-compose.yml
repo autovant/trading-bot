@@ -1,0 +1,19 @@
+services:
+  copy-trader:
+    build: .
+    container_name: polymarket-copy-trader
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - trade-data:/app/data
+      - ./config:/app/config:ro
+    command: ["start", "--dry-run"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  trade-data:
